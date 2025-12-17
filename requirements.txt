@@ -1,0 +1,22 @@
+# Core dependencies for CodeLingerK - Step 1: Code Ingestion & Parsing
+
+# Git operations
+gitpython>=3.1.40
+
+# AST parsing
+tree-sitter>=0.20.4
+tree-sitter-python>=0.20.4
+
+# Data models and validation
+pydantic>=2.0.0
+
+# Development and testing
+pytest>=7.4.0
+pytest-cov>=4.1.0
+
+# Future dependencies (commented out for now)
+# semgrep>=1.45.0              # Static analysis
+# openai>=1.0.0                # LLM integration
+# langchain>=0.1.0             # RAG framework
+# qdrant-client>=1.7.0         # Vector database
+# sentence-transformers>=2.2.0 # Embeddings
