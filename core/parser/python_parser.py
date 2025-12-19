@@ -15,30 +15,45 @@ class PythonParser:
     def parse_file(self, code: str) -> List[CodeSymbol]:
         tree = self.parser.parse(bytes(code, "utf8"))
         symbols = []
-        
-        query = self.lang.query("""
-            (function_definition
-                name: (identifier) @name
-                body: (block) @body) @func
-            (class_definition
-                name: (identifier) @name) @class
-        """)
-        
-        captures = query.captures(tree.root_node)
-        
-        for node, tag in captures:
-            if tag in ['func', 'class']:
-                name_node = node.child_by_field_name('name')
+
+        # Walk tree directly instead of using query API
+        self._walk_tree(tree.root_node, code, symbols)
+        return symbols
+
+    def _walk_tree(self, node, code: str, symbols: List[CodeSymbol]):
+        """Recursively walk AST to find functions and classes"""
+        if node.type == 'function_definition':
+            name_node = node.child_by_field_name('name')
+            if name_node:
                 name = code[name_node.start_byte:name_node.end_byte]
                 content = code[node.start_byte:node.end_byte]
-                
+
                 symbols.append(CodeSymbol(
                     name=name,
-                    type="Function" if tag == 'func' else "Class",
+                    type="Function",
                     line_start=node.start_point[0] + 1,
                     line_end=node.end_point[0] + 1,
                     column_start=node.start_point[1],
                     content=content,
                     body_hash=self._get_hash(content)
                 ))
-        return symbols
+
+        elif node.type == 'class_definition':
+            name_node = node.child_by_field_name('name')
+            if name_node:
+                name = code[name_node.start_byte:name_node.end_byte]
+                content = code[node.start_byte:node.end_byte]
+
+                symbols.append(CodeSymbol(
+                    name=name,
+                    type="Class",
+                    line_start=node.start_point[0] + 1,
+                    line_end=node.end_point[0] + 1,
+                    column_start=node.start_point[1],
+                    content=content,
+                    body_hash=self._get_hash(content)
+                ))
+
+        # Recurse into children
+        for child in node.children:
+            self._walk_tree(child, code, symbols)
