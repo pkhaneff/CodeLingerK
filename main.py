@@ -1,182 +1,169 @@
-#!/usr/bin/env python3
 """
 CodeLingerK - AI-Powered Code Review System
-Main entry point for Step 1: Code Ingestion & Parsing
-
-This demo shows how to extract and structure code changes from a Git repository.
+Moc 1: The Skeleton - FastAPI Webhook Server
 """
 
-import argparse
-import json
-import sys
 from pathlib import Path
+from fastapi import FastAPI, HTTPException, Request
+import uvicorn
 
 from core.logging_config import setup_logging, get_logger
 from core.change_extractor import ChangeExtractor
+from api.models import (
+    GitHubPushPayload,
+    GitHubPRPayload,
+    ReviewResponse,
+    ChangeUnitResponse
+)
 
+setup_logging(level="INFO")
 logger = get_logger(__name__)
 
-def print_change_unit(unit, index: int):
-    """Pretty print a ChangeUnit"""
-    print(f"\n{'='*80}")
-    print(f"Change Unit #{index + 1}")
-    print(f"{'='*80}")
-    print(f"File: {unit.file_path}")
-    print(f"Change Type: {unit.change_type.upper()}")
+app = FastAPI(
+    title="CodeLingerK",
+    description="AI-Powered Code Review System - Moc 1",
+    version="0.1.0"
+)
 
-    if unit.old_symbol:
-        print(f"\n--- OLD SYMBOL ---")
-        print(f"Name: {unit.old_symbol.name}")
-        print(f"Type: {unit.old_symbol.type}")
-        print(f"Lines: {unit.old_symbol.line_start}-{unit.old_symbol.line_end}")
-        print(f"Hash: {unit.old_symbol.body_hash[:12]}...")
 
-    if unit.new_symbol:
-        print(f"\n--- NEW SYMBOL ---")
-        print(f"Name: {unit.new_symbol.name}")
-        print(f"Type: {unit.new_symbol.type}")
-        print(f"Lines: {unit.new_symbol.line_start}-{unit.new_symbol.line_end}")
-        print(f"Hash: {unit.new_symbol.body_hash[:12]}...")
+@app.get("/")
+async def root():
+    return {
+        "service": "CodeLingerK",
+        "status": "running",
+        "stage": "Moc 1 - The Skeleton",
+        "capabilities": [
+            "Parse code changes",
+            "Detect modified functions/classes",
+            "GitHub webhook integration"
+        ]
+    }
 
-    print(f"\n--- DIFF HUNK ---")
-    # Show only first 10 lines of diff
-    hunk_lines = unit.diff_hunk.split('\n')[:10]
-    print('\n'.join(hunk_lines))
-    if len(unit.diff_hunk.split('\n')) > 10:
-        print("... (truncated)")
 
-def main():
-    """Main entry point"""
-    parser = argparse.ArgumentParser(
-        description="CodeLingerK - Extract and structure code changes (Step 1 Demo)"
-    )
+@app.get("/health")
+async def health():
+    return {"status": "healthy"}
 
-    parser.add_argument(
-        "repo_path",
-        nargs="?",
-        default=".",
-        help="Path to Git repository (default: current directory)"
-    )
 
-    parser.add_argument(
-        "--mode",
-        choices=["staged", "unstaged", "all", "commit", "branch"],
-        default="staged",
-        help="Type of changes to extract (default: staged)"
-    )
-
-    parser.add_argument(
-        "--commit",
-        help="Commit SHA (required if mode=commit)"
-    )
-
-    parser.add_argument(
-        "--base",
-        help="Base branch name (required if mode=branch)"
-    )
-
-    parser.add_argument(
-        "--compare",
-        default="HEAD",
-        help="Compare branch name (default: HEAD, used with mode=branch)"
-    )
-
-    parser.add_argument(
-        "--output",
-        "-o",
-        help="Output JSON file path (optional)"
-    )
-
-    parser.add_argument(
-        "--verbose",
-        "-v",
-        action="store_true",
-        help="Enable verbose logging"
-    )
-
-    parser.add_argument(
-        "--log-file",
-        help="Log file path (optional)"
-    )
-
-    args = parser.parse_args()
-
-    # Setup logging
-    log_level = "DEBUG" if args.verbose else "INFO"
-    setup_logging(level=log_level, log_file=args.log_file)
-
-    logger.info("=" * 80)
-    logger.info("CodeLingerK - Step 1: Code Ingestion & Parsing")
-    logger.info("=" * 80)
+@app.post("/webhook/github/push")
+async def github_push(payload: GitHubPushPayload):
+    logger.info(f"Push event: {payload.repository.full_name}, commits: {len(payload.commits)}")
 
     try:
-        # Initialize extractor
-        repo_path = Path(args.repo_path).resolve()
-        logger.info(f"Repository: {repo_path}")
-
+        repo_path = Path(".")
         extractor = ChangeExtractor(str(repo_path))
 
-        # Extract changes
-        logger.info(f"Extraction mode: {args.mode}")
-
         change_units = extractor.extract_changes(
-            mode=args.mode,
-            commit_sha=args.commit,
-            base_branch=args.base,
-            compare_branch=args.compare
+            mode="commit",
+            commit_sha=payload.after
         )
 
-        # Print summary
-        summary = extractor.get_summary(change_units)
-        print(f"\n{'='*80}")
-        print("EXTRACTION SUMMARY")
-        print(f"{'='*80}")
-        print(f"Total Changes: {summary['total_changes']}")
-        print(f"Files Affected: {summary['num_files']}")
-        print(f"\nBy Change Type:")
-        for change_type, count in summary['by_type'].items():
-            if count > 0:
-                print(f"  {change_type.capitalize()}: {count}")
+        changes = []
+        for unit in change_units:
+            symbol = unit.new_symbol or unit.old_symbol
+            change = ChangeUnitResponse(
+                file_path=unit.file_path,
+                change_type=unit.change_type,
+                symbol_name=symbol.name if symbol else None,
+                symbol_type=symbol.type if symbol else None,
+                lines=f"{symbol.line_start}-{symbol.line_end}" if symbol else None
+            )
+            changes.append(change)
 
-        print(f"\nBy Symbol Type:")
-        for symbol_type, count in summary['by_symbol_type'].items():
-            print(f"  {symbol_type}: {count}")
+            if symbol:
+                logger.info(f"{unit.change_type.upper()}: {symbol.type} '{symbol.name}' in {unit.file_path}")
 
-        print(f"\nAffected Files:")
-        for file_path in summary['files_affected']:
-            print(f"  - {file_path}")
-
-        # Print detailed change units
-        if change_units:
-            print(f"\n{'='*80}")
-            print("DETAILED CHANGE UNITS")
-            print(f"{'='*80}")
-
-            for i, unit in enumerate(change_units):
-                print_change_unit(unit, i)
-
-        # Export to JSON if requested
-        if args.output:
-            output_data = {
-                "summary": summary,
-                "changes": [unit.model_dump() for unit in change_units]
-            }
-
-            output_path = Path(args.output)
-            with open(output_path, 'w', encoding='utf-8') as f:
-                json.dump(output_data, f, indent=2, ensure_ascii=False)
-
-            logger.info(f"\nResults exported to: {output_path}")
-
-        logger.info("\n" + "=" * 80)
-        logger.info("Extraction completed successfully!")
-        logger.info("=" * 80)
-
-        return 0
+        return ReviewResponse(
+            status="success",
+            commit_sha=payload.after,
+            changes_detected=len(change_units),
+            changes=changes,
+            message=f"Detected {len(change_units)} code changes"
+        )
 
     except Exception as e:
-        logger.error(f"Error: {e}", exc_info=True)
-        return 1
+        logger.error(f"Error processing push: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/webhook/github/pull_request")
+async def github_pr(payload: GitHubPRPayload):
+    logger.info(f"PR event: {payload.action} - PR #{payload.number}")
+
+    if payload.action not in ["opened", "reopened", "synchronize"]:
+        return {"status": "skipped", "reason": f"Action '{payload.action}' not processed"}
+
+    try:
+        repo_path = Path(".")
+        extractor = ChangeExtractor(str(repo_path))
+
+        base_branch = payload.pull_request.base["ref"]
+        head_sha = payload.pull_request.head["sha"]
+
+        change_units = extractor.extract_changes(
+            mode="branch",
+            base_branch=base_branch,
+            compare_branch=head_sha
+        )
+
+        changes = []
+        for unit in change_units:
+            symbol = unit.new_symbol or unit.old_symbol
+            change = ChangeUnitResponse(
+                file_path=unit.file_path,
+                change_type=unit.change_type,
+                symbol_name=symbol.name if symbol else None,
+                symbol_type=symbol.type if symbol else None,
+                lines=f"{symbol.line_start}-{symbol.line_end}" if symbol else None
+            )
+            changes.append(change)
+
+            if symbol:
+                logger.info(f"{unit.change_type.upper()}: {symbol.type} '{symbol.name}' in {unit.file_path}")
+
+        return ReviewResponse(
+            status="success",
+            commit_sha=head_sha,
+            changes_detected=len(change_units),
+            changes=changes,
+            message=f"PR #{payload.number}: Detected {len(change_units)} changes"
+        )
+
+    except Exception as e:
+        logger.error(f"Error processing PR: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/webhook/github")
+async def github_generic(request: Request):
+    event_type = request.headers.get("X-GitHub-Event")
+
+    if not event_type:
+        raise HTTPException(status_code=400, detail="Missing X-GitHub-Event header")
+
+    logger.info(f"GitHub event: {event_type}")
+
+    if event_type == "ping":
+        return {"status": "pong"}
+
+    return {
+        "status": "received",
+        "event_type": event_type,
+        "message": f"Event '{event_type}' acknowledged"
+    }
+
 
 if __name__ == "__main__":
-    sys.exit(main())
+    logger.info("=" * 60)
+    logger.info("CodeLingerK Server - Moc 1")
+    logger.info("Starting on http://0.0.0.0:8000")
+    logger.info("API docs: http://localhost:8000/docs")
+    logger.info("=" * 60)
+
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True,
+        log_level="info"
+    )
