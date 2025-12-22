@@ -1,4 +1,4 @@
-# Core dependencies for CodeLingerK - Mốc 1: The Skeleton
+# Core dependencies for CodeLingerK - Moc 1 & 2
 
 # FastAPI + ASGI server
 fastapi>=0.104.0
@@ -13,6 +13,9 @@ tree-sitter-python>=0.20.4
 
 # Data models and validation
 pydantic>=2.0.0
+
+# Neo4j - Moc 2: The Memory
+neo4j>=5.14.0
 
 # Development and testing
 pytest>=7.4.0
