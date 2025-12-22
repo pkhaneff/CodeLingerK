@@ -25,6 +25,8 @@ venv/
 env/
 ENV/
 .venv
+.env
+*.json
 
 # IDEs
 .vscode/
@@ -32,7 +34,17 @@ ENV/
 *.swp
 *.swo
 *~
+__init__.*
+__pycache__/
+*.py[cod]
+*$py.class
 
+# file
+*.csv
+*.json
+*.joblib
+*.joblib.dat
+*.npy
 # Testing
 .pytest_cache/
 .coverage
