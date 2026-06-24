@@ -308,7 +308,11 @@ Rules:
                 response=str(response)[:1000],
                 tokens_used=self.ai_client.count_tokens(prompt + str(response)),
                 duration_ms=duration_ms,
-                data=response if isinstance(response, dict) else {'raw': response},
+                data=(
+                    response
+                    if isinstance(response, (dict, list))
+                    else {'raw': response}
+                ),
             )
         except Exception as e:
             logger.error(f'Pass {pass_name} failed: {e}')
@@ -486,7 +490,17 @@ Focus on the most impactful issues. Be constructive and helpful.'''
 
         # Handle both dict and list responses
         if isinstance(data, dict):
-            items = data.get('comments', [])
+            if isinstance(data.get('comments'), list):
+                items = data.get('comments', [])
+            elif isinstance(data.get('raw'), list):
+                items = data.get('raw', [])
+            elif (
+                isinstance(data.get('raw'), dict)
+                and isinstance(data.get('raw', {}).get('comments'), list)
+            ):
+                items = data.get('raw', {}).get('comments', [])
+            else:
+                items = []
         elif isinstance(data, list):
             items = data
         else:
