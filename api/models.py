@@ -1,16 +1,18 @@
 """
 API models for webhook payloads and responses
 """
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict
 from typing import List, Optional, Dict, Any
 
 
 class GitHubCommit(BaseModel):
     """GitHub commit info from webhook"""
+    model_config = ConfigDict(extra='ignore')
+
     id: str
     message: str
-    author: Dict[str, str]
-    url: str
+    author: Dict[str, Any] = {}
+    url: str = ''
     added: List[str] = []
     removed: List[str] = []
     modified: List[str] = []
@@ -18,34 +20,42 @@ class GitHubCommit(BaseModel):
 
 class GitHubRepository(BaseModel):
     """GitHub repository info"""
+    model_config = ConfigDict(extra='ignore')
+
     name: str
     full_name: str
-    html_url: str
-    clone_url: str
+    html_url: str = ''
+    clone_url: str = ''
 
 
 class GitHubPushPayload(BaseModel):
     """GitHub push event webhook payload"""
+    model_config = ConfigDict(extra='ignore')
+
     ref: str
     before: str
     after: str
     repository: GitHubRepository
-    commits: List[GitHubCommit]
+    commits: List[GitHubCommit] = []
     head_commit: Optional[GitHubCommit] = None
 
 
 class GitHubPullRequest(BaseModel):
     """GitHub PR info"""
+    model_config = ConfigDict(extra='ignore')
+
     number: int
-    title: str
-    state: str
-    html_url: str
-    head: Dict[str, Any]
-    base: Dict[str, Any]
+    title: str = ''
+    state: str = ''
+    html_url: str = ''
+    head: Dict[str, Any] = {}
+    base: Dict[str, Any] = {}
 
 
 class GitHubPRPayload(BaseModel):
     """GitHub pull request event webhook payload"""
+    model_config = ConfigDict(extra='ignore')
+
     action: str
     number: int
     pull_request: GitHubPullRequest

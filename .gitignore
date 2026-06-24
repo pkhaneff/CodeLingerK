@@ -1,5 +1,6 @@
 # Python
 __pycache__/
+__init__.py
 *.py[cod]
 *$py.class
 *.so
@@ -64,3 +65,8 @@ output/
 results.json
 *.db
 *.sqlite
+
+.codegraph
+business.md
+.env
+rule.md
