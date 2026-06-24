@@ -1,4 +1,4 @@
-# Core dependencies for CodeLingerK - Mốc 1: The Skeleton
+# Core dependencies for CodeLingerK
 
 # FastAPI + ASGI server
 fastapi>=0.104.0
@@ -13,15 +13,28 @@ tree-sitter-python>=0.20.4
 
 # Data models and validation
 pydantic>=2.0.0
+pydantic-settings>=2.0.0
+
+# Database - PostgreSQL (for all data including code graph)
+sqlalchemy[asyncio]>=2.0.0
+asyncpg>=0.29.0
+alembic>=1.13.0
+
+# Cache - Redis
+redis>=5.0.0
+
+# HTTP client (GitHub API)
+httpx>=0.25.0
+
+# Authentication
+python-jose[cryptography]>=3.3.0
+passlib[bcrypt]>=1.7.4
 
 # Development and testing
 pytest>=7.4.0
 pytest-cov>=4.1.0
-httpx>=0.25.0  # For testing FastAPI endpoints
+pytest-asyncio>=0.23.0
 
 # Future dependencies (commented out for now)
+# anthropic>=0.18.0            # AI code review
 # semgrep>=1.45.0              # Static analysis
-# openai>=1.0.0                # LLM integration
-# langchain>=0.1.0             # RAG framework
-# qdrant-client>=1.7.0         # Vector database
-# sentence-transformers>=2.2.0 # Embeddings

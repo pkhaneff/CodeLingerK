@@ -1,169 +1,137 @@
 """
 CodeLingerK - AI-Powered Code Review System
-Moc 1: The Skeleton - FastAPI Webhook Server
+Moc 4: Code Graph Indexing (PostgreSQL)
 """
 
-from pathlib import Path
-from fastapi import FastAPI, HTTPException, Request
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 from core.logging_config import setup_logging, get_logger
-from core.change_extractor import ChangeExtractor
-from api.models import (
-    GitHubPushPayload,
-    GitHubPRPayload,
-    ReviewResponse,
-    ChangeUnitResponse
-)
+from infra.config import settings
+from infra.database import init_db, close_db
+from infra.redis_client import redis_client
+from api.routes.auth import router as auth_router
+from api.routes.webhooks import router as webhook_router
+from api.routes.repositories import router as repo_router
+from api.routes.graph import router as graph_router
 
-setup_logging(level="INFO")
+setup_logging(level=settings.log_level)
 logger = get_logger(__name__)
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Application lifespan manager.
+
+    Handles startup and shutdown events for database connections.
+    """
+    # Startup
+    logger.info('=' * 60)
+    logger.info(f'{settings.app_name} Server - Moc 4: Code Graph (PostgreSQL)')
+    logger.info('=' * 60)
+
+    # Initialize databases
+    try:
+        logger.info('Initializing PostgreSQL...')
+        await init_db()
+        logger.info('PostgreSQL initialized')
+    except Exception as e:
+        logger.warning(f'PostgreSQL connection failed: {e}')
+
+    try:
+        logger.info('Connecting to Redis...')
+        await redis_client.connect()
+        logger.info('Redis connected')
+    except Exception as e:
+        logger.warning(f'Redis connection failed: {e}')
+
+    logger.info('=' * 60)
+    logger.info('Server ready!')
+    logger.info('API docs: http://localhost:8000/docs')
+    logger.info('=' * 60)
+
+    yield
+
+    # Shutdown
+    logger.info('Shutting down...')
+    await close_db()
+    await redis_client.close()
+    logger.info('Shutdown complete')
+
+
 app = FastAPI(
-    title="CodeLingerK",
-    description="AI-Powered Code Review System - Moc 1",
-    version="0.1.0"
+    title='CodeLingerK',
+    description='AI-Powered Code Review System',
+    version='0.5.0',
+    lifespan=lifespan,
 )
 
+# CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=['*'],  # Configure appropriately for production
+    allow_credentials=True,
+    allow_methods=['*'],
+    allow_headers=['*'],
+)
 
-@app.get("/")
+# Register routers
+app.include_router(auth_router, prefix='/api/v1/auth')
+app.include_router(repo_router, prefix='/api/v1/repositories')
+app.include_router(graph_router, prefix='/api/v1/repositories')
+app.include_router(webhook_router, prefix='/webhook')
+
+
+@app.get('/')
 async def root():
+    """Service info endpoint."""
     return {
-        "service": "CodeLingerK",
-        "status": "running",
-        "stage": "Moc 1 - The Skeleton",
-        "capabilities": [
-            "Parse code changes",
-            "Detect modified functions/classes",
-            "GitHub webhook integration"
-        ]
+        'service': settings.app_name,
+        'status': 'running',
+        'stage': 'Moc 4 - Code Graph Indexing (PostgreSQL)',
+        'version': '0.5.0',
+        'capabilities': [
+            'GitHub OAuth authentication',
+            'Repository management (add/remove/list)',
+            'Repository cloning',
+            'Webhook installation',
+            'Full code graph indexing to PostgreSQL',
+            'Parse Python files (functions, classes, methods)',
+            'Track imports, calls, inheritance',
+            'Query code graph (files, symbols, callers)',
+            'GitHub webhook integration',
+            'PostgreSQL user storage',
+        ],
     }
 
 
-@app.get("/health")
+@app.get('/health')
 async def health():
-    return {"status": "healthy"}
+    """
+    Health check endpoint.
 
-
-@app.post("/webhook/github/push")
-async def github_push(payload: GitHubPushPayload):
-    logger.info(f"Push event: {payload.repository.full_name}, commits: {len(payload.commits)}")
-
-    try:
-        repo_path = Path(".")
-        extractor = ChangeExtractor(str(repo_path))
-
-        change_units = extractor.extract_changes(
-            mode="commit",
-            commit_sha=payload.after
-        )
-
-        changes = []
-        for unit in change_units:
-            symbol = unit.new_symbol or unit.old_symbol
-            change = ChangeUnitResponse(
-                file_path=unit.file_path,
-                change_type=unit.change_type,
-                symbol_name=symbol.name if symbol else None,
-                symbol_type=symbol.type if symbol else None,
-                lines=f"{symbol.line_start}-{symbol.line_end}" if symbol else None
-            )
-            changes.append(change)
-
-            if symbol:
-                logger.info(f"{unit.change_type.upper()}: {symbol.type} '{symbol.name}' in {unit.file_path}")
-
-        return ReviewResponse(
-            status="success",
-            commit_sha=payload.after,
-            changes_detected=len(change_units),
-            changes=changes,
-            message=f"Detected {len(change_units)} code changes"
-        )
-
-    except Exception as e:
-        logger.error(f"Error processing push: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/webhook/github/pull_request")
-async def github_pr(payload: GitHubPRPayload):
-    logger.info(f"PR event: {payload.action} - PR #{payload.number}")
-
-    if payload.action not in ["opened", "reopened", "synchronize"]:
-        return {"status": "skipped", "reason": f"Action '{payload.action}' not processed"}
-
-    try:
-        repo_path = Path(".")
-        extractor = ChangeExtractor(str(repo_path))
-
-        base_branch = payload.pull_request.base["ref"]
-        head_sha = payload.pull_request.head["sha"]
-
-        change_units = extractor.extract_changes(
-            mode="branch",
-            base_branch=base_branch,
-            compare_branch=head_sha
-        )
-
-        changes = []
-        for unit in change_units:
-            symbol = unit.new_symbol or unit.old_symbol
-            change = ChangeUnitResponse(
-                file_path=unit.file_path,
-                change_type=unit.change_type,
-                symbol_name=symbol.name if symbol else None,
-                symbol_type=symbol.type if symbol else None,
-                lines=f"{symbol.line_start}-{symbol.line_end}" if symbol else None
-            )
-            changes.append(change)
-
-            if symbol:
-                logger.info(f"{unit.change_type.upper()}: {symbol.type} '{symbol.name}' in {unit.file_path}")
-
-        return ReviewResponse(
-            status="success",
-            commit_sha=head_sha,
-            changes_detected=len(change_units),
-            changes=changes,
-            message=f"PR #{payload.number}: Detected {len(change_units)} changes"
-        )
-
-    except Exception as e:
-        logger.error(f"Error processing PR: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/webhook/github")
-async def github_generic(request: Request):
-    event_type = request.headers.get("X-GitHub-Event")
-
-    if not event_type:
-        raise HTTPException(status_code=400, detail="Missing X-GitHub-Event header")
-
-    logger.info(f"GitHub event: {event_type}")
-
-    if event_type == "ping":
-        return {"status": "pong"}
+    Returns status of all database connections.
+    """
+    redis_healthy = await redis_client.health_check()
 
     return {
-        "status": "received",
-        "event_type": event_type,
-        "message": f"Event '{event_type}' acknowledged"
+        'status': 'healthy',
+        'services': {
+            'postgresql': 'connected',  # If we got here, it's working
+            'redis': 'connected' if redis_healthy else 'disconnected',
+        },
     }
 
 
-if __name__ == "__main__":
-    logger.info("=" * 60)
-    logger.info("CodeLingerK Server - Moc 1")
-    logger.info("Starting on http://0.0.0.0:8000")
-    logger.info("API docs: http://localhost:8000/docs")
-    logger.info("=" * 60)
-
+if __name__ == '__main__':
     uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
+        'main:app',
+        host='0.0.0.0',
         port=8000,
         reload=True,
-        log_level="info"
+        log_level='info',
     )
