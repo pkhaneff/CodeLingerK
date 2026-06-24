@@ -1,23 +1,25 @@
 """
 Repository service - Manage repositories for indexing.
+
+Provider-agnostic service that works with any Git provider (GitHub, GitLab, etc.)
+through the GitProvider abstraction.
 """
 
-import os
 import secrets
 import shutil
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 from uuid import UUID
 
+from git import Repo as GitRepo
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from git import Repo as GitRepo
 
-from infra.config import settings
-from models.user import User
-from models.repository import Repository, IndexStatus
-from services.github_service import GitHubService
 from core.logging_config import get_logger
+from infra.config import settings
+from models.repository import IndexStatus, Repository
+from models.user import User
+from services.providers.base import GitProvider, GitProviderType, RepoInfo
 
 logger = get_logger(__name__)
 
@@ -26,68 +28,96 @@ class RepositoryService:
     """
     Service for managing repositories.
 
+    Provider-agnostic - works with any GitProvider implementation.
+
     Handles:
-    - Adding repos from GitHub
+    - Listing repos from provider
+    - Adding repos for indexing
     - Cloning repos locally
     - Managing webhooks
     - Tracking index status
     """
 
-    def __init__(self, db: AsyncSession, user: User):
+    def __init__(
+        self,
+        db: AsyncSession,
+        user: User,
+        provider: GitProvider | None = None,
+    ):
         """
         Initialize repository service.
 
         Args:
             db: Database session
             user: Authenticated user
+            provider: GitProvider instance (optional, set via set_provider)
         """
         self.db = db
         self.user = user
-        self.github = GitHubService(user.github_access_token)
+        self._provider = provider
 
-    async def list_github_repos(
+    def set_provider(self, provider: GitProvider) -> None:
+        """Set the git provider for operations."""
+        self._provider = provider
+
+    @property
+    def provider(self) -> GitProvider:
+        """Get current provider, raise if not set."""
+        if not self._provider:
+            raise ValueError('GitProvider not set. Call set_provider() first.')
+        return self._provider
+
+    async def list_provider_repos(
         self,
         page: int = 1,
         per_page: int = 30,
     ) -> list[dict]:
         """
-        List user's GitHub repositories.
+        List user's repositories from the current provider.
 
-        Returns repos from GitHub API, not from our database.
+        Returns repos from provider API, not from our database.
         """
-        repos = await self.github.list_user_repos(page=page, per_page=per_page)
+        repos = await self.provider.list_user_repos(page=page, per_page=per_page)
 
-        return [
-            {
-                'github_id': repo['id'],
-                'full_name': repo['full_name'],
-                'name': repo['name'],
-                'description': repo.get('description'),
-                'private': repo['private'],
-                'default_branch': repo.get('default_branch', 'main'),
-                'clone_url': repo['clone_url'],
-                'html_url': repo['html_url'],
-                'language': repo.get('language'),
-                'updated_at': repo['updated_at'],
-                'stargazers_count': repo.get('stargazers_count', 0),
-            }
-            for repo in repos
-        ]
+        return [self._normalize_repo_response(repo) for repo in repos]
 
-    async def list_added_repos(self) -> list[Repository]:
-        """List repositories added by the user for indexing."""
-        result = await self.db.execute(
-            select(Repository).where(Repository.owner_id == self.user.id)
-        )
+    def _normalize_repo_response(self, repo: RepoInfo) -> dict:
+        """Normalize RepoInfo to API response format."""
+        return {
+            'provider_id': repo['provider_id'],
+            'full_name': repo['full_name'],
+            'name': repo['name'],
+            'description': repo.get('description'),
+            'private': repo['private'],
+            'default_branch': repo.get('default_branch', 'main'),
+            'clone_url': repo['clone_url'],
+            'html_url': repo['html_url'],
+        }
+
+    async def list_added_repos(
+        self,
+        provider_type: GitProviderType | None = None,
+    ) -> list[Repository]:
+        """
+        List repositories added by the user for indexing.
+
+        Args:
+            provider_type: Filter by provider (optional)
+        """
+        query = select(Repository).where(Repository.owner_id == self.user.id)
+
+        if provider_type:
+            query = query.where(Repository.provider == provider_type.value)
+
+        result = await self.db.execute(query)
         return list(result.scalars().all())
 
     async def get_repo(self, repo_id: str) -> Repository | None:
         """
         Get repository by ID.
 
-        Accepts either a UUID string or a GitHub ID (integer string).
+        Accepts either a UUID string or provider_repo_id (integer string).
         """
-        # Try to parse as UUID first
         try:
             UUID(repo_id)
             is_uuid = True
@@ -103,36 +133,40 @@ class RepositoryService:
             )
             return result.scalar_one_or_none()
 
-        # Not a UUID, try as GitHub ID
         try:
-            github_id = int(repo_id)
+            provider_repo_id = int(repo_id)
             result = await self.db.execute(
                 select(Repository).where(
-                    Repository.github_id == github_id,
+                    Repository.provider_repo_id == provider_repo_id,
                     Repository.owner_id == self.user.id,
                 )
             )
             return result.scalar_one_or_none()
         except ValueError:
-            # Not a valid UUID or integer
             return None
 
-    async def get_repo_by_github_id(self, github_id: int) -> Repository | None:
-        """Get repository by GitHub ID."""
+    async def get_repo_by_provider_id(
+        self,
+        provider_type: GitProviderType,
+        provider_repo_id: int,
+    ) -> Repository | None:
+        """Get repository by provider type and provider-specific ID."""
         result = await self.db.execute(
-            select(Repository).where(Repository.github_id == github_id)
+            select(Repository).where(
+                Repository.provider == provider_type.value,
+                Repository.provider_repo_id == provider_repo_id,
+            )
         )
         return result.scalar_one_or_none()
 
-    async def add_repo(self, github_id: int) -> Repository:
+    async def add_repo(self, provider_repo_id: int) -> Repository:
         """
         Add a repository for indexing.
 
-        Automatically registers a webhook with GitHub to receive PR events
-        if WEBHOOK_BASE_URL is configured.
+        Automatically registers a webhook if WEBHOOK_BASE_URL is configured.
 
         Args:
-            github_id: GitHub repository ID
+            provider_repo_id: Provider-specific repository ID
 
         Returns:
             Created Repository model
@@ -140,26 +174,27 @@ class RepositoryService:
         Raises:
             ValueError: If repo already added or not accessible
         """
-        # Check if already added
-        existing = await self.get_repo_by_github_id(github_id)
+        provider_type = self.provider.provider_type
+
+        existing = await self.get_repo_by_provider_id(provider_type, provider_repo_id)
         if existing:
             raise ValueError(f'Repository already added: {existing.full_name}')
 
-        # Fetch repo details from GitHub
         try:
-            github_repo = await self.github.get_repo_by_id(github_id)
+            repo_info = await self.provider.get_repo_by_id(provider_repo_id)
         except Exception as e:
-            logger.error(f'Failed to fetch repo {github_id}: {e}')
+            logger.error(f'Failed to fetch repo {provider_repo_id}: {e}')
             raise ValueError('Repository not found or not accessible')
 
-        # Create repository record
         repo = Repository(
-            github_id=github_id,
+            provider=provider_type.value,
+            provider_repo_id=provider_repo_id,
+            github_id=provider_repo_id if provider_type == GitProviderType.GITHUB else None,
             owner_id=self.user.id,
-            full_name=github_repo['full_name'],
-            name=github_repo['name'],
-            clone_url=github_repo['clone_url'],
-            default_branch=github_repo.get('default_branch', 'main'),
+            full_name=repo_info['full_name'],
+            name=repo_info['name'],
+            clone_url=repo_info['clone_url'],
+            default_branch=repo_info.get('default_branch', 'main'),
             index_status=IndexStatus.PENDING.value,
             webhook_secret=secrets.token_urlsafe(32),
         )
@@ -168,14 +203,12 @@ class RepositoryService:
         await self.db.commit()
         await self.db.refresh(repo)
 
-        logger.info(f'Repository added: {repo.full_name}')
+        logger.info(f'Repository added: {repo.full_name} ({provider_type.value})')
 
-        # Auto-register webhook if WEBHOOK_BASE_URL is configured
         if settings.webhook_url:
             try:
-                await self._register_pr_webhook(repo)
+                await self._register_webhook(repo)
             except Exception as e:
-                # Log but don't fail - webhook can be installed manually later
                 logger.warning(
                     f'Failed to auto-register webhook for {repo.full_name}: {e}. '
                     'Webhook can be installed manually via API.'
@@ -183,24 +216,21 @@ class RepositoryService:
 
         return repo
 
-    async def _register_pr_webhook(self, repo: Repository) -> int:
+    async def _register_webhook(self, repo: Repository) -> int:
         """
-        Register webhook for PR events only.
+        Register webhook for PR/MR events.
 
         Args:
             repo: Repository to register webhook for
 
         Returns:
-            Webhook ID from GitHub
+            Webhook ID from provider
         """
-        owner, name = repo.full_name.split('/')
-
-        webhook = await self.github.create_webhook(
-            owner=owner,
-            repo=name,
+        webhook = await self.provider.create_webhook(
+            repo_identifier=repo.provider_repo_id,
             webhook_url=settings.webhook_url,
             secret=repo.webhook_secret,
-            events=['pull_request'],  # Only PR events, not push
+            events=['pull_request'],
         )
 
         repo.webhook_id = webhook['id']
@@ -222,21 +252,20 @@ class RepositoryService:
         if not repo:
             raise ValueError('Repository not found')
 
-        # Remove webhook if installed
         if repo.webhook_id:
             try:
-                owner, name = repo.full_name.split('/')
-                await self.github.delete_webhook(owner, name, repo.webhook_id)
+                await self.provider.delete_webhook(
+                    repo_identifier=repo.provider_repo_id,
+                    webhook_id=repo.webhook_id,
+                )
             except Exception as e:
                 logger.warning(f'Failed to delete webhook: {e}')
 
-        # Remove local clone
         local_path = self._get_local_path(repo)
         if local_path.exists():
             shutil.rmtree(local_path)
             logger.info(f'Removed local clone: {local_path}')
 
-        # Delete from database
         await self.db.delete(repo)
         await self.db.commit()
 
@@ -245,6 +274,14 @@ class RepositoryService:
     def _get_local_path(self, repo: Repository) -> Path:
         """Get local storage path for repository."""
         return Path(settings.repo_storage_path) / str(repo.id)
+
+    def _get_access_token_for_clone(self, repo: Repository) -> str:
+        """Get the appropriate access token for cloning based on repo provider."""
+        provider_type = repo.provider
+        token = self.user.get_access_token(provider_type)
+        if not token:
+            raise ValueError(f'User not connected to {provider_type}')
+        return token
 
     async def clone_repo(self, repo: Repository) -> Path:
         """
@@ -257,19 +294,28 @@ class RepositoryService:
         """
         local_path = self._get_local_path(repo)
 
-        # Remove existing clone if present
         if local_path.exists():
             shutil.rmtree(local_path)
 
-        # Create parent directory
         local_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Build authenticated clone URL
-        # https://x-access-token:{token}@github.com/owner/repo.git
-        clone_url = repo.clone_url.replace(
-            'https://',
-            f'https://x-access-token:{self.user.github_access_token}@',
-        )
+        access_token = self._get_access_token_for_clone(repo)
+
+        if repo.provider == GitProviderType.GITHUB.value:
+            clone_url = repo.clone_url.replace(
+                'https://',
+                f'https://x-access-token:{access_token}@',
+            )
+        elif repo.provider == GitProviderType.GITLAB.value:
+            clone_url = repo.clone_url.replace(
+                'https://',
+                f'https://oauth2:{access_token}@',
+            )
+        else:
+            clone_url = repo.clone_url.replace(
+                'https://',
+                f'https://oauth2:{access_token}@',
+            )
 
         logger.info(f'Cloning {repo.full_name} to {local_path}')
 
@@ -278,7 +324,7 @@ class RepositoryService:
                 clone_url,
                 local_path,
                 branch=repo.default_branch,
-                depth=1,  # Shallow clone for faster indexing
+                depth=1,
             )
             logger.info(f'Clone complete: {repo.full_name}')
             return local_path
@@ -293,7 +339,7 @@ class RepositoryService:
         webhook_url: str | None = None,
     ) -> int:
         """
-        Install webhook on repository for PR events.
+        Install webhook on repository for PR/MR events.
 
         Args:
             repo: Repository model
@@ -308,15 +354,12 @@ class RepositoryService:
                 'No webhook URL provided. Set WEBHOOK_BASE_URL in environment.'
             )
 
-        owner, name = repo.full_name.split('/')
-
         try:
-            webhook = await self.github.create_webhook(
-                owner=owner,
-                repo=name,
+            webhook = await self.provider.create_webhook(
+                repo_identifier=repo.provider_repo_id,
                 webhook_url=webhook_url,
                 secret=repo.webhook_secret,
-                events=['pull_request'],  # PR events only
+                events=['pull_request'],
             )
 
             repo.webhook_id = webhook['id']

@@ -78,3 +78,51 @@ class ReviewResponse(BaseModel):
     changes_detected: int
     changes: List[ChangeUnitResponse]
     message: str
+
+
+# ─────────────────────────────────────────────────────────────
+# GitLab Webhook Payload Models
+# ─────────────────────────────────────────────────────────────
+
+
+class GitLabProject(BaseModel):
+    """GitLab project info from webhook"""
+    model_config = ConfigDict(extra='ignore')
+
+    id: int
+    name: str
+    path_with_namespace: str
+    web_url: str = ''
+    http_url_to_repo: str = ''
+
+
+class GitLabLastCommit(BaseModel):
+    """GitLab last commit info"""
+    model_config = ConfigDict(extra='ignore')
+
+    id: str
+    message: str = ''
+    url: str = ''
+
+
+class GitLabObjectAttributes(BaseModel):
+    """GitLab merge request object attributes"""
+    model_config = ConfigDict(extra='ignore')
+
+    iid: int
+    title: str = ''
+    state: str = ''
+    action: str | None = None
+    source_branch: str = ''
+    target_branch: str = ''
+    last_commit: GitLabLastCommit
+
+
+class GitLabMRPayload(BaseModel):
+    """GitLab merge request event webhook payload"""
+    model_config = ConfigDict(extra='ignore')
+
+    object_kind: str
+    event_type: str = ''
+    project: GitLabProject
+    object_attributes: GitLabObjectAttributes

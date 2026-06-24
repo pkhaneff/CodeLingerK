@@ -1,11 +1,13 @@
 """
-Repository model - GitHub repositories added for indexing.
+Repository model - Multi-provider repositories for indexing.
+
+Supports GitHub and GitLab repositories.
 """
 
 from datetime import datetime
 from uuid import uuid4
 
-from sqlalchemy import Boolean, DateTime, String, BigInteger, ForeignKey, Enum
+from sqlalchemy import Boolean, DateTime, Index, String, BigInteger, ForeignKey
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 import enum
@@ -15,6 +17,7 @@ from infra.database import Base
 
 class IndexStatus(str, enum.Enum):
     """Repository indexing status."""
+
     PENDING = 'pending'
     INDEXING = 'indexing'
     INDEXED = 'indexed'
@@ -23,13 +26,17 @@ class IndexStatus(str, enum.Enum):
 
 class Repository(Base):
     """
-    Repository model for GitHub repositories.
+    Repository model for Git repositories.
+
+    Supports multiple providers (GitHub, GitLab).
 
     Fields:
         id: UUID primary key
-        github_id: GitHub repository ID (unique)
+        provider: Git provider ('github' or 'gitlab')
+        provider_repo_id: Provider-specific repository ID
+        github_id: GitHub repository ID (legacy, kept for compatibility)
         owner_id: Foreign key to User
-        full_name: Full repo name (owner/repo)
+        full_name: Full repo name (owner/repo or group/project)
         name: Repository name
         clone_url: Git clone URL
         default_branch: Default branch name
@@ -37,7 +44,7 @@ class Repository(Base):
         last_indexed_at: Last indexing timestamp
         last_indexed_commit: Last indexed commit SHA
         index_status: Current indexing status
-        webhook_id: GitHub webhook ID
+        webhook_id: Webhook ID on the provider
         webhook_secret: Webhook secret for verification
         settings: Repository-specific settings (JSON)
     """
@@ -49,7 +56,14 @@ class Repository(Base):
         primary_key=True,
         default=lambda: str(uuid4()),
     )
-    github_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False)
+
+    # Provider identification
+    provider: Mapped[str] = mapped_column(String(50), nullable=False, default='github')
+    provider_repo_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+    # Legacy GitHub field (kept for backward compatibility, nullable for GitLab repos)
+    github_id: Mapped[int | None] = mapped_column(BigInteger, unique=True, nullable=True)
+
     owner_id: Mapped[str] = mapped_column(
         UUID(as_uuid=False),
         ForeignKey('users.id', ondelete='CASCADE'),
@@ -101,7 +115,9 @@ class Repository(Base):
         """Convert to dictionary for API responses."""
         return {
             'id': self.id,
-            'github_id': self.github_id,
+            'provider': self.provider,
+            'provider_repo_id': self.provider_repo_id or self.github_id,
+            'github_id': self.github_id,  # Legacy field
             'full_name': self.full_name,
             'name': self.name,
             'default_branch': self.default_branch,
@@ -111,3 +127,8 @@ class Repository(Base):
             'last_indexed_commit': self.last_indexed_commit,
             'created_at': self.created_at.isoformat() if self.created_at else None,
         }
+
+    __table_args__ = (
+        Index('idx_repositories_provider', 'provider'),
+        Index('idx_repositories_provider_repo', 'provider', 'provider_repo_id', unique=True),
+    )

@@ -1,7 +1,8 @@
 """
-GitHub webhook routes - Handle PR events and post inline review comments.
+Webhook routes - Handle PR/MR events and post inline review comments.
 
-Only triggers on PR events (opened, reopened, synchronize).
+Supports both GitHub and GitLab providers.
+Only triggers on PR/MR events (opened, reopened, synchronize/update).
 Push events are acknowledged but not processed.
 """
 
@@ -14,27 +15,36 @@ from core.logging_config import get_logger
 from infra.database import get_db
 from models.repository import Repository
 from models.user import User
-from services.github_service import GitHubService
-from api.models import (
-    GitHubPushPayload,
-    GitHubPRPayload,
+from services.providers.base import GitProviderType
+from services.providers.factory import GitProviderFactory
+from api.webhooks import (
+    NormalizedWebhookPayload,
+    WebhookPayloadParser,
 )
+from api.models import GitHubPushPayload
 
 logger = get_logger(__name__)
 
 router = APIRouter(tags=['Webhooks'])
 
 
-async def get_repository_with_owner(
+# ─────────────────────────────────────────────────────────────
+# Helper Functions
+# ─────────────────────────────────────────────────────────────
+
+
+async def get_repository_with_owner_by_provider(
     db: AsyncSession,
+    provider: GitProviderType,
     full_name: str,
 ) -> tuple[Repository, User] | None:
     """
-    Look up repository and its owner by full_name.
+    Look up repository and its owner by provider and full_name.
 
     Args:
         db: Database session
-        full_name: Repository full name (owner/repo)
+        provider: Git provider type (github/gitlab)
+        full_name: Repository full name (owner/repo or namespace/project)
 
     Returns:
         Tuple of (Repository, User) or None if not found
@@ -42,7 +52,10 @@ async def get_repository_with_owner(
     stmt = (
         select(Repository)
         .options(selectinload(Repository.owner))
-        .where(Repository.full_name == full_name)
+        .where(
+            Repository.provider == provider.value,
+            Repository.full_name == full_name,
+        )
     )
     result = await db.execute(stmt)
     repo = result.scalar_one_or_none()
@@ -51,6 +64,176 @@ async def get_repository_with_owner(
         return repo, repo.owner
 
     return None
+
+
+def build_review_comments(files: list[dict]) -> list[dict]:
+    """
+    Build inline review comments for changed files.
+
+    Args:
+        files: List of file change info from provider API
+
+    Returns:
+        List of comment dictionaries ready for posting
+    """
+    comments = []
+
+    for file_info in files:
+        filename = file_info.get('filename', '')
+        status = file_info.get('status', '')
+        patch = file_info.get('patch', '')
+
+        # Skip deleted files (no lines to comment on)
+        if status == 'removed':
+            logger.debug(f'Skipping deleted file: {filename}')
+            continue
+
+        # Find the first added/modified line to place the comment
+        # Default to line 1 if we can't parse the patch
+        comment_line = 1
+
+        if patch:
+            # Parse patch to find a valid line number
+            # Look for the first @@ hunk header
+            for line in patch.split('\n'):
+                if line.startswith('@@'):
+                    # Format: @@ -old_start,old_count +new_start,new_count @@
+                    try:
+                        parts = line.split('+')[1].split(' ')[0]
+                        new_start = int(parts.split(',')[0])
+                        comment_line = new_start
+                        break
+                    except (IndexError, ValueError):
+                        pass
+
+        comments.append({
+            'path': filename,
+            'body': f'hello đây là file {filename}',
+            'line': comment_line,
+            'side': 'RIGHT',  # Comment on new file version
+        })
+
+        logger.debug(f'Prepared comment for {filename} at line {comment_line}')
+
+    return comments
+
+
+async def process_pr_webhook(
+    db: AsyncSession,
+    provider: GitProviderType,
+    payload: NormalizedWebhookPayload,
+) -> dict:
+    """
+    Unified PR/MR webhook processing.
+
+    Works with any provider through the GitProvider abstraction.
+
+    Args:
+        db: Database session
+        provider: Git provider type
+        payload: Normalized webhook payload
+
+    Returns:
+        Response dictionary with processing result
+    """
+    # Check if we should process this event
+    if not payload.should_process:
+        return {
+            'status': 'skipped',
+            'reason': payload.skip_reason,
+            'provider': provider.value,
+        }
+
+    # Look up repository and owner
+    repo_data = await get_repository_with_owner_by_provider(
+        db,
+        provider,
+        payload.repo_full_name,
+    )
+
+    if not repo_data:
+        logger.warning(
+            f'Repository not found: {payload.repo_full_name} (provider: {provider.value})'
+        )
+        return {
+            'status': 'skipped',
+            'reason': 'Repository not registered in CodeLingerK',
+            'provider': provider.value,
+        }
+
+    repo, owner = repo_data
+
+    # Get access token for the provider
+    access_token = owner.get_access_token(provider.value)
+    if not access_token:
+        username = owner.gitlab_username or owner.github_username
+        logger.warning(f'No {provider.value} access token for user: {username}')
+        return {
+            'status': 'error',
+            'reason': f'{provider.value} access token not available',
+            'provider': provider.value,
+        }
+
+    # Create provider instance (Dependency Injection)
+    git_provider = GitProviderFactory.create(provider, access_token)
+
+    # Get list of files changed in the PR/MR
+    pr_files = await git_provider.get_pr_files(
+        repo_identifier=repo.full_name,
+        pr_number=payload.pr_number,
+    )
+
+    logger.info(
+        f'{provider.value} PR #{payload.pr_number}: Found {len(pr_files)} changed files'
+    )
+
+    if not pr_files:
+        return {
+            'status': 'success',
+            'message': 'No files changed in PR/MR',
+            'provider': provider.value,
+            'pr_number': payload.pr_number,
+        }
+
+    # Build inline comments
+    comments = build_review_comments(pr_files)
+
+    # Post review with all inline comments
+    if comments:
+        review = await git_provider.post_pr_review(
+            repo_identifier=repo.full_name,
+            pr_number=payload.pr_number,
+            commit_sha=payload.head_sha,
+            body=f'🔍 CodeLingerK đã review {len(comments)} file(s) trong PR/MR này.',
+            comments=comments,
+        )
+
+        logger.info(
+            f'Posted review with {len(comments)} inline comments '
+            f'on {provider.value} PR #{payload.pr_number}'
+        )
+
+        return {
+            'status': 'success',
+            'provider': provider.value,
+            'pr_number': payload.pr_number,
+            'files_reviewed': len(comments),
+            'review_id': review.get('id'),
+            'message': f'Posted {len(comments)} inline comments',
+        }
+
+    return {
+        'status': 'success',
+        'provider': provider.value,
+        'pr_number': payload.pr_number,
+        'files_reviewed': 0,
+        'message': 'No files to comment on',
+    }
+
+
+# ─────────────────────────────────────────────────────────────
+# GitHub Webhook Routes
+# ─────────────────────────────────────────────────────────────
 
 
 @router.post('/github/push')
@@ -69,6 +252,7 @@ async def github_push(payload: GitHubPushPayload):
     return {
         'status': 'skipped',
         'reason': 'Push events are not processed. Reviews only trigger on PR creation.',
+        'provider': 'github',
         'repository': payload.repository.full_name,
         'commits': len(payload.commits),
     }
@@ -91,149 +275,29 @@ async def github_pr(
     # Check for ping event (sent when webhook is first created)
     event_type = request.headers.get('X-GitHub-Event')
     if event_type == 'ping':
-        logger.info('Ping event received - webhook verified')
+        logger.info('GitHub ping event received - webhook verified')
         return {'status': 'pong', 'message': 'Webhook configured successfully'}
 
-    # Parse and validate PR payload
+    # Parse raw payload
     raw_payload = await request.json()
+
     try:
-        payload = GitHubPRPayload(**raw_payload)
+        # Use unified parser to normalize payload
+        payload = WebhookPayloadParser.parse(GitProviderType.GITHUB, raw_payload)
     except Exception as e:
-        logger.warning(f'Invalid PR payload: {e}')
+        logger.warning(f'Invalid GitHub PR payload: {e}')
         return {
             'status': 'skipped',
             'reason': f'Not a valid pull_request event: {e}',
+            'provider': 'github',
         }
 
-    logger.info(f'PR event: {payload.action} - PR #{payload.number}')
-
-    if payload.action not in ['opened', 'reopened', 'synchronize']:
-        return {
-            'status': 'skipped',
-            'reason': f"Action '{payload.action}' not processed",
-        }
+    logger.info(f'GitHub PR event: {payload.action} - PR #{payload.pr_number}')
 
     try:
-        # Look up repository and owner to get access token
-        repo_data = await get_repository_with_owner(
-            db,
-            payload.repository.full_name,
-        )
-
-        if not repo_data:
-            logger.warning(
-                f'Repository not found in database: {payload.repository.full_name}'
-            )
-            return {
-                'status': 'skipped',
-                'reason': 'Repository not registered in CodeLingerK',
-            }
-
-        repo, owner = repo_data
-
-        if not owner.github_access_token:
-            logger.warning(f'No access token for user: {owner.github_username}')
-            return {
-                'status': 'error',
-                'reason': 'Owner access token not available',
-            }
-
-        # Initialize GitHub service with owner's token
-        github_service = GitHubService(owner.github_access_token)
-
-        # Parse owner and repo name from full_name
-        owner_name, repo_name = payload.repository.full_name.split('/')
-        pr_number = payload.number
-        head_sha = payload.pull_request.head['sha']
-
-        # Get list of files changed in the PR
-        pr_files = await github_service.get_pull_request_files(
-            owner=owner_name,
-            repo=repo_name,
-            pr_number=pr_number,
-        )
-
-        logger.info(f'PR #{pr_number}: Found {len(pr_files)} changed files')
-
-        if not pr_files:
-            return {
-                'status': 'success',
-                'message': 'No files changed in PR',
-                'pr_number': pr_number,
-            }
-
-        # Build inline comments for each file
-        comments = []
-        for file_info in pr_files:
-            filename = file_info.get('filename', '')
-            status = file_info.get('status', '')  # added, modified, removed
-            patch = file_info.get('patch', '')
-
-            # Skip deleted files (no lines to comment on)
-            if status == 'removed':
-                logger.debug(f'Skipping deleted file: {filename}')
-                continue
-
-            # Find the first added/modified line to place the comment
-            # Default to line 1 if we can't parse the patch
-            comment_line = 1
-
-            if patch:
-                # Parse patch to find a valid line number
-                # Look for the first @@ hunk header
-                for line in patch.split('\n'):
-                    if line.startswith('@@'):
-                        # Format: @@ -old_start,old_count +new_start,new_count @@
-                        try:
-                            parts = line.split('+')[1].split(' ')[0]
-                            new_start = int(parts.split(',')[0])
-                            comment_line = new_start
-                            break
-                        except (IndexError, ValueError):
-                            pass
-
-            comments.append({
-                'path': filename,
-                'body': f'hello đây là file {filename}',
-                'line': comment_line,
-                'side': 'RIGHT',  # Comment on new file version
-            })
-
-            logger.info(f'Prepared comment for {filename} at line {comment_line}')
-
-        # Post review with all inline comments at once
-        if comments:
-            review = await github_service.create_pr_review_with_comments(
-                owner=owner_name,
-                repo=repo_name,
-                pr_number=pr_number,
-                commit_id=head_sha,
-                body=f'🔍 CodeLingerK đã review {len(comments)} file(s) trong PR này.',
-                event='COMMENT',
-                comments=comments,
-            )
-
-            logger.info(
-                f'Posted review with {len(comments)} inline comments on PR #{pr_number}'
-            )
-
-            return {
-                'status': 'success',
-                'pr_number': pr_number,
-                'files_reviewed': len(comments),
-                'review_id': review.get('id'),
-                'message': f'Posted {len(comments)} inline comments',
-            }
-
-        return {
-            'status': 'success',
-            'pr_number': pr_number,
-            'files_reviewed': 0,
-            'message': 'No files to comment on',
-        }
-
+        return await process_pr_webhook(db, GitProviderType.GITHUB, payload)
     except Exception as e:
-        logger.error(f'Error processing PR: {e}', exc_info=True)
+        logger.error(f'Error processing GitHub PR: {e}', exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -252,10 +316,82 @@ async def github_generic(request: Request):
     logger.info(f'GitHub event: {event_type}')
 
     if event_type == 'ping':
-        return {'status': 'pong'}
+        return {'status': 'pong', 'provider': 'github'}
 
     return {
         'status': 'received',
+        'provider': 'github',
+        'event_type': event_type,
+        'message': f"Event '{event_type}' acknowledged",
+    }
+
+
+# ─────────────────────────────────────────────────────────────
+# GitLab Webhook Routes
+# ─────────────────────────────────────────────────────────────
+
+
+@router.post('/gitlab/merge_request')
+async def gitlab_mr(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Handle GitLab merge request webhook event.
+
+    For each file changed in the MR, posts an inline review comment
+    directly on the file diff in the GitLab MR interface.
+
+    Only processes: open, reopen, update actions/states.
+    """
+    # Parse raw payload
+    raw_payload = await request.json()
+
+    # Check event type
+    object_kind = raw_payload.get('object_kind')
+    if object_kind != 'merge_request':
+        logger.info(f'GitLab event type: {object_kind} - SKIPPED (MR-only mode)')
+        return {
+            'status': 'skipped',
+            'reason': f"Event type '{object_kind}' not processed",
+            'provider': 'gitlab',
+        }
+
+    try:
+        # Use unified parser to normalize payload
+        payload = WebhookPayloadParser.parse(GitProviderType.GITLAB, raw_payload)
+    except Exception as e:
+        logger.warning(f'Invalid GitLab MR payload: {e}')
+        return {
+            'status': 'skipped',
+            'reason': f'Not a valid merge_request event: {e}',
+            'provider': 'gitlab',
+        }
+
+    logger.info(f'GitLab MR event: {payload.action} - MR !{payload.pr_number}')
+
+    try:
+        return await process_pr_webhook(db, GitProviderType.GITLAB, payload)
+    except Exception as e:
+        logger.error(f'Error processing GitLab MR: {e}', exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post('/gitlab')
+async def gitlab_generic(request: Request):
+    """
+    Handle generic GitLab webhook events.
+
+    Routes to specific handlers or acknowledges unknown events.
+    """
+    raw_payload = await request.json()
+    event_type = raw_payload.get('object_kind', 'unknown')
+
+    logger.info(f'GitLab event: {event_type}')
+
+    return {
+        'status': 'received',
+        'provider': 'gitlab',
         'event_type': event_type,
         'message': f"Event '{event_type}' acknowledged",
     }

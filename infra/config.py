@@ -58,18 +58,38 @@ class Settings(BaseSettings):
     github_app_private_key_path: str = ''
     github_webhook_secret: str = ''
 
+    # GitLab OAuth (gitlab.com only)
+    gitlab_client_id: str = ''
+    gitlab_client_secret: str = ''
+    gitlab_redirect_uri: str = 'http://localhost:8000/api/v1/auth/gitlab/callback'
+    gitlab_webhook_secret: str = ''
+
     # Webhook configuration
-    # Public URL where GitHub will send webhook events
+    # Public URL where providers will send webhook events
     # Example: https://your-domain.com or https://abc123.ngrok.io
     webhook_base_url: str = ''
 
     @property
     def webhook_url(self) -> str:
-        """Full webhook URL for PR events."""
+        """Full webhook URL for GitHub PR events."""
         if not self.webhook_base_url:
             return ''
-        # Must match: main.py prefix='/webhook' + webhooks.py '/github/pull_request'
         return f'{self.webhook_base_url.rstrip("/")}/webhook/github/pull_request'
+
+    @property
+    def gitlab_webhook_url(self) -> str:
+        """Full webhook URL for GitLab MR events."""
+        if not self.webhook_base_url:
+            return ''
+        return f'{self.webhook_base_url.rstrip("/")}/webhook/gitlab/merge_request'
+
+    def get_webhook_url(self, provider: str) -> str:
+        """Get webhook URL for specified provider."""
+        if provider == 'github':
+            return self.webhook_url
+        elif provider == 'gitlab':
+            return self.gitlab_webhook_url
+        return ''
 
     # JWT
     jwt_secret_key: str = 'change-me-in-production'
