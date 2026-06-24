@@ -1,9 +1,12 @@
 """
-Webhook routes - Handle PR/MR events and post inline review comments.
+Webhook routes - Handle PR/MR events and queue for AI review pipeline.
 
 Supports both GitHub and GitLab providers.
 Only triggers on PR/MR events (opened, reopened, synchronize/update).
 Push events are acknowledged but not processed.
+
+Pipeline flow:
+    Webhook → Snapshot → Queue(CONTEXT) → Worker processes pipeline
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -14,9 +17,12 @@ from sqlalchemy.orm import selectinload
 from core.logging_config import get_logger
 from infra.database import get_db
 from models.repository import Repository
+from models.review_job import JobType
 from models.user import User
 from services.providers.base import GitProviderType
 from services.providers.factory import GitProviderFactory
+from services.snapshot_service import SnapshotService
+from services.queue_service import QueueService
 from api.webhooks import (
     NormalizedWebhookPayload,
     WebhookPayloadParser,
@@ -66,67 +72,17 @@ async def get_repository_with_owner_by_provider(
     return None
 
 
-def build_review_comments(files: list[dict]) -> list[dict]:
-    """
-    Build inline review comments for changed files.
-
-    Args:
-        files: List of file change info from provider API
-
-    Returns:
-        List of comment dictionaries ready for posting
-    """
-    comments = []
-
-    for file_info in files:
-        filename = file_info.get('filename', '')
-        status = file_info.get('status', '')
-        patch = file_info.get('patch', '')
-
-        # Skip deleted files (no lines to comment on)
-        if status == 'removed':
-            logger.debug(f'Skipping deleted file: {filename}')
-            continue
-
-        # Find the first added/modified line to place the comment
-        # Default to line 1 if we can't parse the patch
-        comment_line = 1
-
-        if patch:
-            # Parse patch to find a valid line number
-            # Look for the first @@ hunk header
-            for line in patch.split('\n'):
-                if line.startswith('@@'):
-                    # Format: @@ -old_start,old_count +new_start,new_count @@
-                    try:
-                        parts = line.split('+')[1].split(' ')[0]
-                        new_start = int(parts.split(',')[0])
-                        comment_line = new_start
-                        break
-                    except (IndexError, ValueError):
-                        pass
-
-        comments.append({
-            'path': filename,
-            'body': f'hello đây là file {filename}',
-            'line': comment_line,
-            'side': 'RIGHT',  # Comment on new file version
-        })
-
-        logger.debug(f'Prepared comment for {filename} at line {comment_line}')
-
-    return comments
-
-
 async def process_pr_webhook(
     db: AsyncSession,
     provider: GitProviderType,
     payload: NormalizedWebhookPayload,
 ) -> dict:
     """
-    Unified PR/MR webhook processing.
+    Unified PR/MR webhook processing with queue-based pipeline.
 
-    Works with any provider through the GitProvider abstraction.
+    Creates an immutable snapshot of the PR state and queues it for
+    AI review processing through the pipeline:
+        CONTEXT → LAYER → REVIEW → PUBLISH
 
     Args:
         db: Database session
@@ -134,7 +90,7 @@ async def process_pr_webhook(
         payload: Normalized webhook payload
 
     Returns:
-        Response dictionary with processing result
+        Response dictionary with snapshot_id and job_id for tracking
     """
     # Check if we should process this event
     if not payload.should_process:
@@ -177,57 +133,67 @@ async def process_pr_webhook(
     # Create provider instance (Dependency Injection)
     git_provider = GitProviderFactory.create(provider, access_token)
 
-    # Get list of files changed in the PR/MR
-    pr_files = await git_provider.get_pr_files(
-        repo_identifier=repo.full_name,
+    # ─────────────────────────────────────────────────────────────
+    # Phase 1: Create Snapshot (Immutable PR State)
+    # ─────────────────────────────────────────────────────────────
+    snapshot_service = SnapshotService(db, git_provider)
+
+    # Create snapshot (idempotent - returns existing if same commit)
+    snapshot = await snapshot_service.create_snapshot(
+        repository=repo,
         pr_number=payload.pr_number,
+        commit_sha=payload.head_sha,
+        source_branch=payload.source_branch,
+        target_branch=payload.target_branch,
+        title=payload.title,
+        author=payload.author,
     )
 
     logger.info(
-        f'{provider.value} PR #{payload.pr_number}: Found {len(pr_files)} changed files'
+        f'Snapshot created: {snapshot.id[:8]} for PR #{payload.pr_number} '
+        f'@ {payload.head_sha[:8]}'
     )
 
-    if not pr_files:
-        return {
-            'status': 'success',
-            'message': 'No files changed in PR/MR',
+    # ─────────────────────────────────────────────────────────────
+    # Phase 2: Enqueue for Processing
+    # ─────────────────────────────────────────────────────────────
+    queue_service = QueueService(db)
+
+    # Calculate priority based on PR size
+    priority = snapshot_service.calculate_priority(snapshot)
+
+    # Enqueue the first job in pipeline (CONTEXT)
+    job_id = await queue_service.enqueue(
+        job_type=JobType.CONTEXT,
+        snapshot_id=str(snapshot.id),
+        priority=priority,
+        metadata={
             'provider': provider.value,
             'pr_number': payload.pr_number,
-        }
+            'repo_full_name': repo.full_name,
+            'owner_id': str(owner.id),
+        },
+    )
 
-    # Build inline comments
-    comments = build_review_comments(pr_files)
+    # Commit the transaction
+    await db.commit()
 
-    # Post review with all inline comments
-    if comments:
-        review = await git_provider.post_pr_review(
-            repo_identifier=repo.full_name,
-            pr_number=payload.pr_number,
-            commit_sha=payload.head_sha,
-            body=f'🔍 CodeLingerK đã review {len(comments)} file(s) trong PR/MR này.',
-            comments=comments,
-        )
-
-        logger.info(
-            f'Posted review with {len(comments)} inline comments '
-            f'on {provider.value} PR #{payload.pr_number}'
-        )
-
-        return {
-            'status': 'success',
-            'provider': provider.value,
-            'pr_number': payload.pr_number,
-            'files_reviewed': len(comments),
-            'review_id': review.get('id'),
-            'message': f'Posted {len(comments)} inline comments',
-        }
+    logger.info(
+        f'Queued job {job_id[:8]} for snapshot {snapshot.id[:8]} '
+        f'with priority {priority}'
+    )
 
     return {
-        'status': 'success',
+        'status': 'queued',
         'provider': provider.value,
         'pr_number': payload.pr_number,
-        'files_reviewed': 0,
-        'message': 'No files to comment on',
+        'commit_sha': payload.head_sha,
+        'snapshot_id': str(snapshot.id),
+        'job_id': job_id,
+        'priority': priority,
+        'files_changed': snapshot.files_count,
+        'total_changes': snapshot.total_changes,
+        'message': 'PR queued for AI review pipeline',
     }
 
 

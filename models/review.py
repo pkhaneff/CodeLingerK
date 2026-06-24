@@ -6,8 +6,8 @@ from datetime import datetime
 from uuid import uuid4
 import enum
 
-from sqlalchemy import DateTime, String, Integer, ForeignKey, Text, Enum
-from sqlalchemy.dialects.postgresql import UUID, JSONB
+from sqlalchemy import DateTime, String, Integer, BigInteger, ForeignKey, Text, Boolean, Float, Index
+from sqlalchemy.dialects.postgresql import UUID, JSONB, ARRAY
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from infra.database import Base
@@ -88,7 +88,30 @@ class Review(Base):
     ai_tokens_used: Mapped[int | None] = mapped_column(Integer, nullable=True)
     processing_time_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
-    github_review_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    github_review_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    # Snapshot relationship (new field for pipeline)
+    snapshot_id: Mapped[str | None] = mapped_column(
+        UUID(as_uuid=False),
+        ForeignKey('snapshots.id', ondelete='SET NULL'),
+        nullable=True,
+    )
+
+    # AI multi-pass results
+    ai_passes: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # Structure: {
+    #   "pass_1_understanding": {...},
+    #   "pass_2_risks": {...},
+    #   "pass_3_quality": {...},
+    #   "pass_4_business": {...},
+    #   "pass_5_comments": [...]
+    # }
+
+    # Generated diagram (mermaid syntax)
+    diagram_mermaid: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Suggested review order (file paths)
+    review_order: Mapped[list[str] | None] = mapped_column(ARRAY(String), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -101,10 +124,16 @@ class Review(Base):
 
     # Relationships
     repository: Mapped['Repository'] = relationship('Repository', back_populates='reviews')
+    snapshot: Mapped['Snapshot'] = relationship('Snapshot', back_populates='review')
     comments: Mapped[list['ReviewComment']] = relationship(
         'ReviewComment',
         back_populates='review',
         cascade='all, delete-orphan',
+    )
+
+    __table_args__ = (
+        Index('idx_reviews_snapshot_id', 'snapshot_id'),
+        Index('idx_reviews_repository_id', 'repository_id'),
     )
 
     def __repr__(self) -> str:
@@ -115,6 +144,7 @@ class Review(Base):
         return {
             'id': self.id,
             'repository_id': self.repository_id,
+            'snapshot_id': self.snapshot_id,
             'pull_request_number': self.pull_request_number,
             'commit_sha': self.commit_sha,
             'review_type': self.review_type,
@@ -123,6 +153,10 @@ class Review(Base):
             'summary': self.summary,
             'changes_analyzed': self.changes_analyzed,
             'files_analyzed': self.files_analyzed,
+            'ai_model': self.ai_model,
+            'ai_tokens_used': self.ai_tokens_used,
+            'processing_time_ms': self.processing_time_ms,
+            'review_order': self.review_order,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'completed_at': self.completed_at.isoformat() if self.completed_at else None,
         }
@@ -174,7 +208,15 @@ class ReviewComment(Base):
     comment: Mapped[str] = mapped_column(Text, nullable=False)
     suggestion: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    github_comment_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    github_comment_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    # Sync tracking (for GitHub integration)
+    provider_comment_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    is_synced: Mapped[bool] = mapped_column(Boolean, default=False)
+    sync_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # AI confidence score (0.0 - 1.0)
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -183,6 +225,12 @@ class ReviewComment(Base):
 
     # Relationships
     review: Mapped['Review'] = relationship('Review', back_populates='comments')
+
+    __table_args__ = (
+        Index('idx_review_comments_review_id', 'review_id'),
+        Index('idx_review_comments_provider_id', 'provider_comment_id'),
+        Index('idx_review_comments_synced', 'is_synced'),
+    )
 
     def __repr__(self) -> str:
         return f'<ReviewComment {self.file_path}:{self.line_start}>'
@@ -200,4 +248,6 @@ class ReviewComment(Base):
             'category': self.category,
             'comment': self.comment,
             'suggestion': self.suggestion,
+            'confidence': self.confidence,
+            'is_synced': self.is_synced,
         }

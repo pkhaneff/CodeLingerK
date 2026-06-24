@@ -100,6 +100,53 @@ class Settings(BaseSettings):
     # Repository storage
     repo_storage_path: str = '/tmp/codelingerk/repos'
 
+    # AI Provider Configuration
+    # Supported providers: claude, openai, deepseek, groq, custom
+    # For OpenAI-compatible providers (deepseek, groq, custom), use AI_BASE_URL
+    ai_provider: str = 'openai'
+    ai_api_key: str = ''  # Unified API key for any provider
+    ai_base_url: str = ''  # Base URL for OpenAI-compatible providers (e.g., https://api.deepseek.com)
+    ai_model: str = 'gpt-4o'  # Model name varies by provider
+    ai_max_tokens: int = 4096
+    ai_temperature: float = 0.3
+    ai_timeout: int = 120
+    ai_max_retries: int = 3
+    ai_retry_delay: float = 1.0
+
+    # Legacy keys (deprecated - use ai_api_key instead)
+    anthropic_api_key: str = ''
+    openai_api_key: str = ''
+
+    @property
+    def effective_ai_api_key(self) -> str:
+        """Get the effective API key (unified or legacy)."""
+        if self.ai_api_key:
+            return self.ai_api_key
+        if self.ai_provider == 'claude':
+            return self.anthropic_api_key
+        return self.openai_api_key
+
+    @property
+    def effective_ai_base_url(self) -> str | None:
+        """Get base URL for OpenAI-compatible providers."""
+        if self.ai_base_url:
+            return self.ai_base_url
+        # Default base URLs for known providers
+        provider_urls = {
+            'deepseek': 'https://api.deepseek.com',
+            'groq': 'https://api.groq.com/openai/v1',
+        }
+        return provider_urls.get(self.ai_provider)
+
+    # Review Settings
+    review_max_context_tokens: int = 50000
+    review_max_comments_per_file: int = 5
+    review_max_comments_per_pr: int = 20
+
+    # Queue Settings
+    queue_job_timeout_seconds: int = 300
+    queue_max_retries: int = 3
+
 
 @lru_cache
 def get_settings() -> Settings:

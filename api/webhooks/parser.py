@@ -32,6 +32,8 @@ class NormalizedWebhookPayload:
     head_sha: str  # Commit SHA
     source_branch: str  # Source branch name
     target_branch: str  # Target branch name
+    title: str | None  # PR/MR title
+    author: str | None  # PR/MR author username
     should_process: bool  # Whether this event should be processed
     skip_reason: str | None = None  # Reason for skipping (if any)
 
@@ -74,6 +76,7 @@ class GitHubPayloadParser(BasePayloadParser):
         # Handle case where this isn't a PR event
         pr = raw.get('pull_request', {})
         repo = raw.get('repository', {})
+        user = pr.get('user', {})
 
         return NormalizedWebhookPayload(
             provider=GitProviderType.GITHUB,
@@ -85,6 +88,8 @@ class GitHubPayloadParser(BasePayloadParser):
             head_sha=pr.get('head', {}).get('sha', ''),
             source_branch=pr.get('head', {}).get('ref', ''),
             target_branch=pr.get('base', {}).get('ref', ''),
+            title=pr.get('title'),
+            author=user.get('login'),
             should_process=should_process,
             skip_reason=None if should_process else f"Action '{action}' not processed",
         )
@@ -103,6 +108,7 @@ class GitLabPayloadParser(BasePayloadParser):
         """Parse GitLab merge_request webhook payload."""
         attrs = raw.get('object_attributes', {})
         project = raw.get('project', {})
+        user = raw.get('user', {})
 
         # GitLab uses both 'action' and 'state' fields
         action = attrs.get('action')
@@ -122,6 +128,8 @@ class GitLabPayloadParser(BasePayloadParser):
             head_sha=attrs.get('last_commit', {}).get('id', ''),
             source_branch=attrs.get('source_branch', ''),
             target_branch=attrs.get('target_branch', ''),
+            title=attrs.get('title'),
+            author=user.get('username'),
             should_process=should_process,
             skip_reason=(
                 None
@@ -190,6 +198,8 @@ class WebhookPayloadParser:
                 head_sha='',
                 source_branch='',
                 target_branch='',
+                title=None,
+                author=None,
                 should_process=False,
                 skip_reason=f'Parse error: {e}',
             )

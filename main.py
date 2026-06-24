@@ -17,6 +17,7 @@ from api.routes.auth import router as auth_router
 from api.routes.webhooks import router as webhook_router
 from api.routes.repositories import router as repo_router
 from api.routes.graph import router as graph_router
+from api.routes.reviews import router as reviews_router
 
 setup_logging(level=settings.log_level)
 logger = get_logger(__name__)
@@ -83,6 +84,7 @@ app.add_middleware(
 app.include_router(auth_router, prefix='/api/v1/auth')
 app.include_router(repo_router, prefix='/api/v1/repositories')
 app.include_router(graph_router, prefix='/api/v1/repositories')
+app.include_router(reviews_router, prefix='/api/v1')
 app.include_router(webhook_router, prefix='/webhook')
 
 
@@ -92,8 +94,8 @@ async def root():
     return {
         'service': settings.app_name,
         'status': 'running',
-        'stage': 'Moc 4 - Code Graph Indexing (PostgreSQL)',
-        'version': '0.5.0',
+        'stage': 'Moc 5 - AI Review Pipeline',
+        'version': '0.6.0',
         'capabilities': [
             'GitHub OAuth authentication',
             'Repository management (add/remove/list)',
@@ -105,6 +107,12 @@ async def root():
             'Query code graph (files, symbols, callers)',
             'GitHub webhook integration',
             'PostgreSQL user storage',
+            'AI-powered code review pipeline',
+            'Snapshot-based immutable PR state',
+            'Functional layer classification',
+            '5-pass AI review analysis',
+            'GitHub review sync',
+            'Queue-based async processing',
         ],
     }
 
