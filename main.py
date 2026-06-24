@@ -3,6 +3,7 @@ CodeLingerK - AI-Powered Code Review System
 Moc 4: Code Graph Indexing (PostgreSQL)
 """
 
+import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -18,6 +19,7 @@ from api.routes.webhooks import router as webhook_router
 from api.routes.repositories import router as repo_router
 from api.routes.graph import router as graph_router
 from api.routes.reviews import router as reviews_router
+from worker import Worker
 
 setup_logging(level=settings.log_level)
 logger = get_logger(__name__)
@@ -28,7 +30,8 @@ async def lifespan(app: FastAPI):
     """
     Application lifespan manager.
 
-    Handles startup and shutdown events for database connections.
+    Handles startup and shutdown events for database connections
+    and background worker.
     """
     # Startup
     logger.info('=' * 60)
@@ -50,6 +53,11 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f'Redis connection failed: {e}')
 
+    # Start background worker
+    worker = Worker(queues=['context', 'layer', 'review', 'publish'], concurrency=1)
+    worker_task = asyncio.create_task(worker.run())
+    logger.info('Background worker started')
+
     logger.info('=' * 60)
     logger.info('Server ready!')
     logger.info('API docs: http://localhost:8000/docs')
@@ -59,6 +67,17 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     logger.info('Shutting down...')
+    worker.shutdown()
+    try:
+        await asyncio.wait_for(worker_task, timeout=10)
+    except asyncio.TimeoutError:
+        logger.warning('Worker did not stop gracefully, cancelling')
+        worker_task.cancel()
+        try:
+            await worker_task
+        except asyncio.CancelledError:
+            pass
+    
     await close_db()
     await redis_client.close()
     logger.info('Shutdown complete')
