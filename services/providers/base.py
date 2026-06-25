@@ -261,6 +261,26 @@ class GitProvider(ABC):
         """
         pass
 
+    @abstractmethod
+    async def update_pr_body(
+        self,
+        repo_identifier: str | int,
+        pr_number: int,
+        body: str,
+    ) -> dict:
+        """
+        Update PR/MR description body.
+
+        Args:
+            repo_identifier: Repository ID or full_name
+            pr_number: Pull request number
+            body: New body content for the PR description
+
+        Returns:
+            Provider-specific response with updated PR data
+        """
+        pass
+
     # ─────────────────────────────────────────────────────────────
     # Webhook Operations
     # ─────────────────────────────────────────────────────────────

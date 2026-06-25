@@ -1,7 +1,7 @@
 """
-GitHubSyncService - Sync reviews to GitHub PR.
+GitHubSyncService - Sync reviews to Git providers.
 
-Posts AI-generated review comments to GitHub using the GitHub API.
+Posts AI-generated review summary and inline comments as bot review.
 Tracks sync status and handles errors gracefully.
 """
 
@@ -18,6 +18,7 @@ from models.repository import Repository
 from models.review import Review, ReviewComment
 from models.snapshot import Snapshot
 from models.user import User
+from infra.config import settings
 from services.providers.base import GitProvider, ReviewComment as ProviderReviewComment
 from services.providers.factory import GitProviderFactory, GitProviderType
 
@@ -26,10 +27,10 @@ logger = get_logger(__name__)
 
 class GitHubSyncService:
     """
-    Service for syncing reviews to GitHub.
+    Service for syncing reviews to Git providers.
 
     Responsibilities:
-    - Post review summary as PR comment
+    - Post review summary as bot review comment
     - Post inline comments via review API
     - Track provider_comment_id for each comment
     - Handle sync errors gracefully
@@ -70,19 +71,25 @@ class GitHubSyncService:
         if not repository:
             raise ValueError(f'Repository not found: {pull_request.repository_id}')
 
-        # Get owner with access token
-        owner = await self._get_repository_owner(repository.id)
-        if not owner:
-            raise ValueError(f'Repository owner not found')
-
-        # Get access token
-        access_token = owner.get_access_token(repository.provider)
-        if not access_token:
-            raise ValueError(f'No access token for {repository.provider}')
-
         # Create provider instance
+        # For GitHub: use App provider (bot) if configured, otherwise use user OAuth
         provider_type = GitProviderType(repository.provider)
-        git_provider = GitProviderFactory.create(provider_type, access_token)
+
+        if provider_type == GitProviderType.GITHUB and settings.github_app_enabled:
+            # Use GitHub App - comments will appear as "CodeLingerK [bot]"
+            git_provider = GitProviderFactory.create_github_app()
+            logger.info('Using GitHub App provider for bot comments')
+        else:
+            # Fallback to user OAuth token
+            owner = await self._get_repository_owner(repository.id)
+            if not owner:
+                raise ValueError('Repository owner not found')
+
+            access_token = owner.get_access_token(repository.provider)
+            if not access_token:
+                raise ValueError(f'No access token for {repository.provider}')
+
+            git_provider = GitProviderFactory.create(provider_type, access_token)
 
         # Build review body
         review_body = self._build_review_body(review)
@@ -93,8 +100,10 @@ class GitHubSyncService:
         # Convert to provider format
         provider_comments = self._convert_comments(comments)
 
-        # Post review to GitHub
+        # Sync review to provider
         try:
+            # Post review with summary and inline comments
+            # This appears as "CodeLingerK [bot] reviewed" instead of "edited by"
             result = await git_provider.post_pr_review(
                 repo_identifier=repository.full_name,
                 pr_number=pull_request.pr_number,
@@ -115,7 +124,7 @@ class GitHubSyncService:
             await self.db.flush()
 
             logger.info(
-                f'Posted review to GitHub: review_id={result.get("id")}, '
+                f'Synced review to provider: review_id={result.get("id")}, '
                 f'comments={len(comments)}'
             )
 
@@ -126,7 +135,7 @@ class GitHubSyncService:
             }
 
         except Exception as e:
-            logger.error(f'Failed to sync review to GitHub: {e}')
+            logger.error(f'Failed to sync review to provider: {e}')
 
             # Mark comments with sync error
             for comment in comments:

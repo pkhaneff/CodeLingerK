@@ -58,3 +58,7 @@ results.json
 business.md
 .env
 rule.md
+
+# Private keys (GitHub App, etc.)
+private/
+*.pem

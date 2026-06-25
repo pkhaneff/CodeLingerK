@@ -1,15 +1,18 @@
 """
-GitHub Provider - Implementation of GitProvider for GitHub API.
+GitHub App authentication provider.
 
-This module provides GitHub-specific implementation of the GitProvider interface.
-All GitHub API interactions are encapsulated here.
+Uses GitHub App credentials to authenticate as a bot for posting reviews.
+Comments posted using App authentication appear as "AppName [bot]".
 """
 
+import time
+import logging
 from typing import Any
 
 import httpx
+import jwt
 
-from core.logging_config import get_logger
+from infra.config import settings
 from services.providers.base import (
     FileChange,
     GitProvider,
@@ -21,41 +24,107 @@ from services.providers.base import (
     WebhookInfo,
 )
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 GITHUB_API_BASE = 'https://api.github.com'
 
 
-class GitHubProvider(GitProvider):
+class GitHubAppProvider(GitProvider):
     """
-    GitHub implementation of GitProvider interface.
+    GitHub provider using App authentication.
 
-    Uses GitHub REST API v3 with user's OAuth access token.
-    All responses are normalized to common TypedDict formats.
+    This provider authenticates as a GitHub App (bot) rather than a user.
+    All actions (comments, reviews) will appear as coming from the App.
+
+    Usage:
+        provider = GitHubAppProvider()
+        await provider.post_pr_review(...)  # Comment appears as "CodeLingerK [bot]"
     """
 
-    def __init__(self, access_token: str):
+    def __init__(
+        self,
+        app_id: str | None = None,
+        private_key: str | None = None,
+        installation_id: str | None = None,
+    ):
         """
-        Initialize GitHub provider with user's access token.
+        Initialize GitHub App provider.
 
         Args:
-            access_token: GitHub OAuth access token
+            app_id: GitHub App ID (defaults to settings)
+            private_key: Private key PEM content (defaults to settings)
+            installation_id: Installation ID (defaults to settings)
         """
-        self.access_token = access_token
-        self._headers = {
-            'Authorization': f'Bearer {access_token}',
-            'Accept': 'application/vnd.github+json',
-            'X-GitHub-Api-Version': '2022-11-28',
-        }
+        self.app_id = app_id or settings.github_app_id
+        self.private_key = private_key or settings.github_app_private_key
+        self.installation_id = installation_id or settings.github_app_installation_id
+
+        if not all([self.app_id, self.private_key, self.installation_id]):
+            raise ValueError(
+                'GitHub App not configured. Set GITHUB_APP_ID, '
+                'GITHUB_APP_PRIVATE_KEY_PATH, and GITHUB_APP_INSTALLATION_ID'
+            )
+
+        self._installation_token: str | None = None
+        self._token_expires_at: float = 0
 
     @property
     def provider_type(self) -> GitProviderType:
         """Return GitHub as provider type."""
         return GitProviderType.GITHUB
 
-    # ─────────────────────────────────────────────────────────────
-    # Internal HTTP Methods
-    # ─────────────────────────────────────────────────────────────
+    def _generate_jwt(self) -> str:
+        """Generate JWT for GitHub App authentication."""
+        now = int(time.time())
+        payload = {
+            'iat': now - 60,  # Issued 60 seconds ago (clock drift)
+            'exp': now + 600,  # Expires in 10 minutes
+            'iss': self.app_id,
+        }
+        return jwt.encode(payload, self.private_key, algorithm='RS256')
+
+    async def _get_installation_token(self) -> str:
+        """
+        Get installation access token.
+
+        Caches the token until it expires.
+        """
+        if self._installation_token and time.time() < self._token_expires_at - 60:
+            return self._installation_token
+
+        jwt_token = self._generate_jwt()
+
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f'{GITHUB_API_BASE}/app/installations/{self.installation_id}/access_tokens',
+                headers={
+                    'Authorization': f'Bearer {jwt_token}',
+                    'Accept': 'application/vnd.github+json',
+                    'X-GitHub-Api-Version': '2022-11-28',
+                },
+            )
+
+            if response.status_code >= 400:
+                logger.error(f'Failed to get installation token: {response.text}')
+                response.raise_for_status()
+
+            data = response.json()
+            self._installation_token = data['token']
+            # Token expires in 1 hour, parse the expiration time
+            # Format: "2024-01-15T12:00:00Z"
+            self._token_expires_at = time.time() + 3600  # Default 1 hour
+
+            logger.debug('GitHub App installation token refreshed')
+            return self._installation_token
+
+    async def _get_headers(self) -> dict[str, str]:
+        """Get headers with installation token."""
+        token = await self._get_installation_token()
+        return {
+            'Authorization': f'Bearer {token}',
+            'Accept': 'application/vnd.github+json',
+            'X-GitHub-Api-Version': '2022-11-28',
+        }
 
     async def _request(
         self,
@@ -63,14 +132,15 @@ class GitHubProvider(GitProvider):
         endpoint: str,
         **kwargs,
     ) -> dict[str, Any] | list[Any]:
-        """Make authenticated request to GitHub API."""
+        """Make authenticated request to GitHub API using App token."""
         url = f'{GITHUB_API_BASE}{endpoint}'
+        headers = await self._get_headers()
 
         async with httpx.AsyncClient() as client:
             response = await client.request(
                 method,
                 url,
-                headers=self._headers,
+                headers=headers,
                 **kwargs,
             )
 
@@ -78,22 +148,13 @@ class GitHubProvider(GitProvider):
                 logger.error(f'GitHub API error: {response.status_code} - {response.text}')
                 response.raise_for_status()
 
-            # Handle 204 No Content
             if response.status_code == 204:
                 return {}
 
             return response.json()
 
     def _parse_repo_identifier(self, repo_identifier: str | int) -> tuple[str, str] | int:
-        """
-        Parse repository identifier to owner/repo or ID.
-
-        Args:
-            repo_identifier: Either 'owner/repo' string or numeric ID
-
-        Returns:
-            Tuple of (owner, repo) or int ID
-        """
+        """Parse repository identifier to owner/repo or ID."""
         if isinstance(repo_identifier, int):
             return repo_identifier
         if '/' in str(repo_identifier):
@@ -106,14 +167,14 @@ class GitHubProvider(GitProvider):
     # ─────────────────────────────────────────────────────────────
 
     async def get_current_user(self) -> UserInfo:
-        """Get authenticated user info."""
-        data = await self._request('GET', '/user')
+        """Get authenticated app info."""
+        data = await self._request('GET', '/app')
         return UserInfo(
             provider_id=data['id'],
-            username=data['login'],
-            email=data.get('email'),
-            avatar_url=data.get('avatar_url'),
-            name=data.get('name'),
+            username=data['slug'],
+            email=None,
+            avatar_url=data.get('owner', {}).get('avatar_url'),
+            name=data['name'],
         )
 
     # ─────────────────────────────────────────────────────────────
@@ -125,17 +186,17 @@ class GitHubProvider(GitProvider):
         page: int = 1,
         per_page: int = 30,
     ) -> list[RepoInfo]:
-        """List repositories accessible by authenticated user."""
+        """List repositories accessible by the App installation."""
         params = {
             'page': page,
             'per_page': min(per_page, 100),
-            'sort': 'updated',
-            'direction': 'desc',
-            'type': 'all',
         }
-        data = await self._request('GET', '/user/repos', params=params)
-
-        return [self._normalize_repo(repo) for repo in data]
+        data = await self._request(
+            'GET',
+            '/installation/repositories',
+            params=params,
+        )
+        return [self._normalize_repo(repo) for repo in data.get('repositories', [])]
 
     async def get_repo(self, repo_identifier: str | int) -> RepoInfo:
         """Get repository by ID or full_name."""
@@ -179,7 +240,6 @@ class GitHubProvider(GitProvider):
         parsed = self._parse_repo_identifier(repo_identifier)
 
         if isinstance(parsed, int):
-            # Need to get repo first to get owner/name
             repo = await self.get_repo_by_id(parsed)
             owner, name = repo['full_name'].split('/')
         else:
@@ -219,7 +279,11 @@ class GitHubProvider(GitProvider):
         body: str,
         comments: list[ReviewComment],
     ) -> dict:
-        """Post review with inline comments on PR."""
+        """
+        Post review with inline comments on PR.
+
+        This will appear as coming from "CodeLingerK [bot]".
+        """
         parsed = self._parse_repo_identifier(repo_identifier)
 
         if isinstance(parsed, int):
@@ -228,7 +292,6 @@ class GitHubProvider(GitProvider):
         else:
             owner, name = parsed
 
-        # Convert ReviewComment to GitHub format
         github_comments = [
             {
                 'path': c['path'],
@@ -245,6 +308,8 @@ class GitHubProvider(GitProvider):
             'event': 'COMMENT',
             'comments': github_comments,
         }
+
+        logger.info(f'Posting review as bot on {owner}/{name}#{pr_number}')
 
         return await self._request(
             'POST',
@@ -315,7 +380,6 @@ class GitHubProvider(GitProvider):
         else:
             owner, name = parsed
 
-        # Translate normalized events to GitHub events
         github_events = self._translate_events(events)
 
         data = {
@@ -347,10 +411,11 @@ class GitHubProvider(GitProvider):
         else:
             owner, name = parsed
 
+        headers = await self._get_headers()
         async with httpx.AsyncClient() as client:
             response = await client.delete(
                 f'{GITHUB_API_BASE}/repos/{owner}/{name}/hooks/{webhook_id}',
-                headers=self._headers,
+                headers=headers,
             )
             response.raise_for_status()
 
@@ -369,7 +434,10 @@ class GitHubProvider(GitProvider):
             owner, name = parsed
 
         try:
-            result = await self._request('GET', f'/repos/{owner}/{name}/hooks/{webhook_id}')
+            result = await self._request(
+                'GET',
+                f'/repos/{owner}/{name}/hooks/{webhook_id}',
+            )
             return self._normalize_webhook(result)
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 404:
@@ -377,26 +445,19 @@ class GitHubProvider(GitProvider):
             raise
 
     def _translate_events(self, events: list[str]) -> list[str]:
-        """Translate normalized event names to GitHub event names."""
+        """Translate normalized event names to GitHub events."""
         event_map = {
             'pull_request': 'pull_request',
             'push': 'push',
             'issue': 'issues',
-            'issue_comment': 'issue_comment',
         }
         return [event_map.get(e, e) for e in events]
 
     def _normalize_webhook(self, data: dict) -> WebhookInfo:
-        """Normalize GitHub webhook response to WebhookInfo."""
+        """Normalize GitHub webhook response."""
         return WebhookInfo(
             id=data['id'],
             url=data['config']['url'],
             events=data['events'],
             active=data['active'],
         )
-
-
-# Register GitHubProvider with factory
-from services.providers.factory import GitProviderFactory
-
-GitProviderFactory.register(GitProviderType.GITHUB, GitHubProvider)

@@ -9,16 +9,25 @@ Usage:
     from services.providers.factory import GitProviderFactory
     from services.providers.base import GitProviderType
 
+    # User OAuth provider
     provider = GitProviderFactory.create(GitProviderType.GITHUB, access_token)
     user = await provider.get_current_user()
+
+    # GitHub App provider (for bot comments)
+    bot_provider = GitProviderFactory.create_github_app()
+    await bot_provider.post_pr_review(...)  # Appears as "CodeLingerK [bot]"
 """
 
+import logging
 from typing import TYPE_CHECKING
 
+from infra.config import settings
 from services.providers.base import GitProvider, GitProviderType
 
 if TYPE_CHECKING:
     pass
+
+logger = logging.getLogger(__name__)
 
 
 class GitProviderFactory:
@@ -100,3 +109,29 @@ class GitProviderFactory:
     def supported_providers(cls) -> list[GitProviderType]:
         """Get list of supported provider types."""
         return list(cls._providers.keys())
+
+    @classmethod
+    def create_github_app(cls) -> GitProvider:
+        """
+        Create a GitHub App provider for bot operations.
+
+        Uses GitHub App credentials from settings to authenticate.
+        Reviews/comments posted via this provider will appear as
+        "CodeLingerK [bot]" instead of a user account.
+
+        Returns:
+            GitHubAppProvider instance
+
+        Raises:
+            ValueError: If GitHub App is not configured
+        """
+        if not settings.github_app_enabled:
+            raise ValueError(
+                'GitHub App not configured. Set GITHUB_APP_ID, '
+                'GITHUB_APP_PRIVATE_KEY_PATH, and GITHUB_APP_INSTALLATION_ID'
+            )
+
+        from services.providers.github_app import GitHubAppProvider
+
+        logger.info('Creating GitHub App provider for bot operations')
+        return GitHubAppProvider()

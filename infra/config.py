@@ -53,10 +53,34 @@ class Settings(BaseSettings):
     github_client_secret: str = ''
     github_redirect_uri: str = 'http://localhost:8000/api/v1/auth/github/callback'
 
-    # GitHub App (for webhooks)
+    # GitHub App (for bot comments)
     github_app_id: str = ''
     github_app_private_key_path: str = ''
+    github_app_installation_id: str = ''
     github_webhook_secret: str = ''
+
+    @property
+    def github_app_private_key(self) -> str | None:
+        """Read GitHub App private key from file."""
+        if not self.github_app_private_key_path:
+            return None
+        try:
+            from pathlib import Path
+            key_path = Path(self.github_app_private_key_path)
+            if key_path.exists():
+                return key_path.read_text()
+        except Exception:
+            pass
+        return None
+
+    @property
+    def github_app_enabled(self) -> bool:
+        """Check if GitHub App is configured."""
+        return bool(
+            self.github_app_id
+            and self.github_app_private_key
+            and self.github_app_installation_id
+        )
 
     # GitLab OAuth (gitlab.com only)
     gitlab_client_id: str = ''

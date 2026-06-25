@@ -33,11 +33,6 @@ async def lifespan(app: FastAPI):
     Handles startup and shutdown events for database connections
     and background worker.
     """
-    # Startup
-    logger.info('=' * 60)
-    logger.info(f'{settings.app_name} Server - Moc 4: Code Graph (PostgreSQL)')
-    logger.info('=' * 60)
-
     # Initialize databases
     try:
         logger.info('Initializing PostgreSQL...')

@@ -40,7 +40,6 @@ class RedisClient:
                 decode_responses=True,
             )
             await self._client.ping()
-            logger.info(f'Connected to Redis at {settings.redis_url}')
         except Exception as e:
             logger.error(f'Failed to connect to Redis: {e}')
             raise

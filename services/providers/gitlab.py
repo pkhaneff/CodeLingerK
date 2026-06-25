@@ -273,6 +273,21 @@ class GitLabProvider(GitProvider):
 
         return {'discussions': results, 'count': len(comments)}
 
+    async def update_pr_body(
+        self,
+        repo_identifier: str | int,
+        pr_number: int,
+        body: str,
+    ) -> dict:
+        """Update merge request description."""
+        project_id = self._parse_repo_identifier(repo_identifier)
+
+        return await self._request(
+            'PUT',
+            f'/projects/{project_id}/merge_requests/{pr_number}',
+            json={'description': body},
+        )
+
     def _normalize_mr(self, data: dict) -> PullRequestInfo:
         """Normalize GitLab MR response to PullRequestInfo."""
         return PullRequestInfo(
