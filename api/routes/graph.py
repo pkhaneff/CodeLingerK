@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from infra.database import get_db
 from api.middleware.auth import get_current_user
+from api.responses import success_response
 from models.user import User
 from models.repository import Repository
 from services.graph_service import GraphService
@@ -70,7 +71,7 @@ async def get_user_repo(
 
 
 # Routes
-@router.get('/{repo_id}/graph/files', response_model=list[FileResponse])
+@router.get('/{repo_id}/graph/files')
 async def list_files(
     repo_id: str,
     db: AsyncSession = Depends(get_db),
@@ -85,10 +86,10 @@ async def list_files(
     graph = GraphService(db, str(repo.id))
     files = await graph.get_files()
 
-    return [FileResponse(**f) for f in files]
+    return success_response([FileResponse(**f) for f in files])
 
 
-@router.get('/{repo_id}/graph/symbols', response_model=list[SymbolResponse])
+@router.get('/{repo_id}/graph/symbols')
 async def list_symbols(
     repo_id: str,
     file: str | None = Query(None, description='Filter by file path'),
@@ -113,10 +114,10 @@ async def list_symbols(
     else:
         symbols = await graph.get_symbols(file)
 
-    return [SymbolResponse(**s) for s in symbols]
+    return success_response([SymbolResponse(**s) for s in symbols])
 
 
-@router.get('/{repo_id}/graph/callers/{symbol_name}', response_model=list[CallerResponse])
+@router.get('/{repo_id}/graph/callers/{symbol_name}')
 async def get_callers(
     repo_id: str,
     symbol_name: str,
@@ -132,7 +133,7 @@ async def get_callers(
     graph = GraphService(db, str(repo.id))
     callers = await graph.get_callers(symbol_name)
 
-    return [CallerResponse(**c) for c in callers]
+    return success_response([CallerResponse(**c) for c in callers])
 
 
 @router.get('/{repo_id}/graph/callees/{symbol_name}')
@@ -151,10 +152,10 @@ async def get_callees(
     graph = GraphService(db, str(repo.id))
     callees = await graph.get_callees(symbol_name)
 
-    return callees
+    return success_response(callees)
 
 
-@router.get('/{repo_id}/graph/dependencies/{file_path:path}', response_model=list[DependencyResponse])
+@router.get('/{repo_id}/graph/dependencies/{file_path:path}')
 async def get_dependencies(
     repo_id: str,
     file_path: str,
@@ -170,7 +171,7 @@ async def get_dependencies(
     graph = GraphService(db, str(repo.id))
     deps = await graph.get_dependencies(file_path)
 
-    return [DependencyResponse(**d) for d in deps]
+    return success_response([DependencyResponse(**d) for d in deps])
 
 
 @router.get('/{repo_id}/graph/hierarchy/{class_name}')
@@ -189,10 +190,10 @@ async def get_class_hierarchy(
     graph = GraphService(db, str(repo.id))
     hierarchy = await graph.get_class_hierarchy(class_name)
 
-    return hierarchy
+    return success_response(hierarchy)
 
 
-@router.get('/{repo_id}/graph/stats', response_model=IndexStatsResponse)
+@router.get('/{repo_id}/graph/stats')
 async def get_graph_stats(
     repo_id: str,
     db: AsyncSession = Depends(get_db),
@@ -204,6 +205,6 @@ async def get_graph_stats(
     graph = GraphService(db, str(repo.id))
     stats = await graph.get_graph_stats()
 
-    return IndexStatsResponse(**stats)
+    return success_response(IndexStatsResponse(**stats))
 
 

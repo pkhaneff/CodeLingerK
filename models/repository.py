@@ -46,6 +46,7 @@ class Repository(Base):
         index_status: Current indexing status
         webhook_id: Webhook ID on the provider
         webhook_secret: Webhook secret for verification
+        is_active: Whether this is the currently active repository for the user
         settings: Repository-specific settings (JSON)
     """
 
@@ -88,6 +89,9 @@ class Repository(Base):
     webhook_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     webhook_secret: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
+    # Active repository - only one repo can be active per user at a time
+    is_active: Mapped[bool] = mapped_column(Boolean, default=False)
+
     settings: Mapped[dict] = mapped_column(JSONB, default=dict)
 
     created_at: Mapped[datetime] = mapped_column(
@@ -125,6 +129,7 @@ class Repository(Base):
             'index_status': self.index_status,
             'last_indexed_at': self.last_indexed_at.isoformat() if self.last_indexed_at else None,
             'last_indexed_commit': self.last_indexed_commit,
+            'is_active': self.is_active,
             'created_at': self.created_at.isoformat() if self.created_at else None,
         }
 

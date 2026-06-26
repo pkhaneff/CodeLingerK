@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     debug: bool = False
     log_level: str = 'INFO'
 
+    # Frontend URL (for OAuth redirects)
+    frontend_url: str = 'http://localhost:3000'
+
     # PostgreSQL
     postgres_host: str = 'localhost'
     postgres_port: int = 5432

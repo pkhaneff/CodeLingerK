@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from api.middleware.auth import get_current_user
+from api.responses import success_response
 from core.logging_config import get_logger
 from infra.database import get_db
 from models.layer import Layer
@@ -154,7 +155,7 @@ class RetryResponse(BaseModel):
 # ─────────────────────────────────────────────────────────────
 
 
-@router.get('/repos/{repo_id}/pull-requests', response_model=list[PullRequestResponse])
+@router.get('/repos/{repo_id}/pull-requests')
 async def list_pull_requests(
     repo_id: str,
     status: str | None = Query(None, description='Filter by status'),
@@ -225,10 +226,10 @@ async def list_pull_requests(
             created_at=pr.created_at.isoformat() if pr.created_at else '',
         ))
 
-    return responses
+    return success_response(responses)
 
 
-@router.get('/repos/{repo_id}/pull-requests/{pr_number}', response_model=PullRequestResponse)
+@router.get('/repos/{repo_id}/pull-requests/{pr_number}')
 async def get_pull_request(
     repo_id: str,
     pr_number: int,
@@ -267,7 +268,7 @@ async def get_pull_request(
     )
     latest_snapshot_id = latest_result.scalar_one_or_none()
 
-    return PullRequestResponse(
+    return success_response(PullRequestResponse(
         id=pr.id,
         pr_number=pr.pr_number,
         title=pr.title,
@@ -279,7 +280,7 @@ async def get_pull_request(
         snapshot_count=snapshot_count,
         latest_snapshot_id=latest_snapshot_id,
         created_at=pr.created_at.isoformat() if pr.created_at else '',
-    )
+    ))
 
 
 # ─────────────────────────────────────────────────────────────
@@ -287,7 +288,7 @@ async def get_pull_request(
 # ─────────────────────────────────────────────────────────────
 
 
-@router.get('/snapshots/{snapshot_id}', response_model=SnapshotDetailResponse)
+@router.get('/snapshots/{snapshot_id}')
 async def get_snapshot(
     snapshot_id: str,
     db: AsyncSession = Depends(get_db),
@@ -372,14 +373,14 @@ async def get_snapshot(
             completed_at=review.completed_at.isoformat() if review.completed_at else None,
         )
 
-    return SnapshotDetailResponse(
+    return success_response(SnapshotDetailResponse(
         snapshot=snapshot_resp,
         layers=layers_resp,
         review=review_resp,
-    )
+    ))
 
 
-@router.post('/snapshots/{snapshot_id}/retry', response_model=RetryResponse)
+@router.post('/snapshots/{snapshot_id}/retry')
 async def retry_snapshot(
     snapshot_id: str,
     db: AsyncSession = Depends(get_db),
@@ -421,9 +422,8 @@ async def retry_snapshot(
 
     await db.commit()
 
-    return RetryResponse(
-        success=True,
-        job_id=job_id,
+    return success_response(
+        {'job_id': job_id},
         message='Snapshot queued for reprocessing',
     )
 
@@ -433,7 +433,7 @@ async def retry_snapshot(
 # ─────────────────────────────────────────────────────────────
 
 
-@router.get('/queue/stats', response_model=QueueStatsResponse)
+@router.get('/queue/stats')
 async def get_queue_stats(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -442,14 +442,14 @@ async def get_queue_stats(
     queue_service = QueueService(db)
     stats = await queue_service.get_queue_stats()
 
-    return QueueStatsResponse(
+    return success_response(QueueStatsResponse(
         queues=stats.get('queues', {}),
         processing=stats.get('processing', 0),
         dead_letter=stats.get('dead_letter', 0),
-    )
+    ))
 
 
-@router.get('/jobs', response_model=list[dict])
+@router.get('/jobs')
 async def list_jobs(
     snapshot_id: str | None = Query(None),
     status: str | None = Query(None),
@@ -468,4 +468,4 @@ async def list_jobs(
     result = await db.execute(query)
     jobs = result.scalars().all()
 
-    return [job.to_dict() for job in jobs]
+    return success_response([job.to_dict() for job in jobs])

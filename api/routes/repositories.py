@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.dependencies.git_provider import create_provider_for_user, get_git_provider
 from api.middleware.auth import get_current_user
+from api.responses import success_response
 from core.logging_config import get_logger
 from infra.config import settings
 from infra.database import get_db
@@ -50,6 +51,7 @@ class RepoResponse(BaseModel):
     last_indexed_at: str | None
     last_indexed_commit: str | None
     webhook_installed: bool
+    is_active: bool
     created_at: str
 
     class Config:
@@ -87,7 +89,7 @@ def get_repo_service(
 # ─────────────────────────────────────────────────────────────
 
 
-@router.get('/{provider}/repos', response_model=list[ProviderRepoResponse])
+@router.get('/{provider}/repos')
 async def list_provider_repos(
     provider: GitProviderType,
     page: int = Query(1, ge=1),
@@ -107,10 +109,10 @@ async def list_provider_repos(
     """
     service = RepositoryService(db, user, git_provider)
     repos = await service.list_provider_repos(page=page, per_page=per_page)
-    return repos
+    return success_response(repos)
 
 
-@router.post('/{provider}/repos', response_model=RepoResponse)
+@router.post('/{provider}/repos')
 async def add_repo(
     provider: GitProviderType,
     request: AddRepoRequest,
@@ -129,7 +131,7 @@ async def add_repo(
     service = RepositoryService(db, user, git_provider)
     try:
         repo = await service.add_repo(request.provider_repo_id)
-        return _repo_to_response(repo)
+        return success_response(_repo_to_response(repo))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -139,7 +141,7 @@ async def add_repo(
 # ─────────────────────────────────────────────────────────────
 
 
-@router.get('', response_model=list[RepoResponse])
+@router.get('')
 async def list_repos(
     provider: GitProviderType | None = Query(None, description='Filter by provider'),
     service: RepositoryService = Depends(get_repo_service),
@@ -152,10 +154,10 @@ async def list_repos(
     - **provider**: Filter by provider (optional)
     """
     repos = await service.list_added_repos(provider_type=provider)
-    return [_repo_to_response(repo) for repo in repos]
+    return success_response([_repo_to_response(repo) for repo in repos])
 
 
-@router.get('/{repo_id}', response_model=RepoResponse)
+@router.get('/{repo_id}')
 async def get_repo(
     repo_id: str,
     service: RepositoryService = Depends(get_repo_service),
@@ -165,7 +167,7 @@ async def get_repo(
     if not repo:
         raise HTTPException(status_code=404, detail='Repository not found')
 
-    return _repo_to_response(repo)
+    return success_response(_repo_to_response(repo))
 
 
 @router.delete('/{repo_id}')
@@ -191,7 +193,7 @@ async def remove_repo(
 
     try:
         await service.remove_repo(repo_id)
-        return {'success': True, 'message': 'Repository removed'}
+        return success_response(None, message='Repository removed')
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
@@ -212,11 +214,10 @@ async def clone_repo(
 
     try:
         path = await service.clone_repo(repo)
-        return {
-            'success': True,
-            'message': f'Repository cloned to {path}',
-            'local_path': str(path),
-        }
+        return success_response(
+            {'local_path': str(path)},
+            message=f'Repository cloned to {path}',
+        )
     except Exception as e:
         logger.error(f'Clone failed: {e}')
         raise HTTPException(status_code=500, detail=f'Clone failed: {e}')
@@ -267,12 +268,10 @@ async def install_webhook(
 
     try:
         webhook_id = await service.install_webhook(repo)
-        return {
-            'success': True,
-            'message': 'Webhook installed',
-            'webhook_id': webhook_id,
-            'webhook_url': settings.webhook_url,
-        }
+        return success_response(
+            {'webhook_id': webhook_id, 'webhook_url': settings.webhook_url},
+            message='Webhook installed',
+        )
     except Exception as e:
         logger.error(f'Webhook install failed: {e}')
         raise HTTPException(status_code=500, detail=f'Failed to install webhook: {e}')
@@ -308,11 +307,10 @@ async def trigger_index(
         index_service = IndexService(db, repo)
         stats = await index_service.full_index()
 
-        return {
-            'success': True,
-            'message': f'Indexed {stats["files_processed"]} files',
-            'stats': stats,
-        }
+        return success_response(
+            {'stats': stats},
+            message=f'Indexed {stats["files_processed"]} files',
+        )
 
     except Exception as e:
         logger.error(f'Indexing failed: {e}')
@@ -329,12 +327,77 @@ async def get_index_status(
     if not repo:
         raise HTTPException(status_code=404, detail='Repository not found')
 
-    return {
+    return success_response({
         'status': repo.index_status,
         'is_indexed': repo.is_indexed,
         'last_indexed_at': repo.last_indexed_at.isoformat() if repo.last_indexed_at else None,
         'last_indexed_commit': repo.last_indexed_commit,
-    }
+    })
+
+
+# ─────────────────────────────────────────────────────────────
+# Active Repository Management
+# ─────────────────────────────────────────────────────────────
+
+
+@router.post('/{repo_id}/activate')
+async def activate_repo(
+    repo_id: str,
+    service: RepositoryService = Depends(get_repo_service),
+):
+    """
+    Set a repository as active.
+
+    Only one repository can be active per user at a time.
+    Activating a repo will automatically deactivate any other active repo.
+
+    Active repositories are the ones currently being worked on and will
+    receive priority for AI code reviews.
+    """
+    try:
+        repo = await service.activate_repo(repo_id)
+        return success_response(
+            _repo_to_response(repo),
+            message=f'Repository {repo.full_name} is now active',
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.post('/{repo_id}/deactivate')
+async def deactivate_repo(
+    repo_id: str,
+    service: RepositoryService = Depends(get_repo_service),
+):
+    """
+    Deactivate a repository.
+
+    The repository will no longer be marked as active.
+    """
+    try:
+        repo = await service.deactivate_repo(repo_id)
+        return success_response(
+            _repo_to_response(repo),
+            message=f'Repository {repo.full_name} is now inactive',
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.get('/active')
+async def get_active_repo(
+    service: RepositoryService = Depends(get_repo_service),
+):
+    """
+    Get the currently active repository.
+
+    Returns null if no repository is currently active.
+    """
+    repo = await service.get_active_repo()
+    if not repo:
+        return success_response(None, message='No active repository')
+
+    return success_response(_repo_to_response(repo))
 
 
 # ─────────────────────────────────────────────────────────────
@@ -356,5 +419,6 @@ def _repo_to_response(repo) -> RepoResponse:
         last_indexed_at=repo.last_indexed_at.isoformat() if repo.last_indexed_at else None,
         last_indexed_commit=repo.last_indexed_commit,
         webhook_installed=repo.webhook_id is not None,
+        is_active=repo.is_active,
         created_at=repo.created_at.isoformat(),
     )

@@ -4,14 +4,18 @@ Authentication routes - Multi-provider OAuth flow.
 Supports GitHub and GitLab OAuth.
 """
 
+from urllib.parse import urlencode
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import RedirectResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from infra.database import get_db
 from infra.redis_client import redis_client
+from infra.config import settings
 from services.auth_service import auth_service
 from api.middleware.auth import get_current_user
+from api.responses import success_response
 from models.user import User
 from core.logging_config import get_logger
 
@@ -50,37 +54,33 @@ async def github_callback(
     """
     Handle GitHub OAuth callback.
 
-    Exchanges authorization code for access token and creates/updates user.
-
-    Returns:
-        JSON with access_token and user info
+    Exchanges authorization code for access token and redirects to frontend.
     """
+    frontend_callback = f'{settings.frontend_url}/auth/callback'
+
     # Verify state for CSRF protection
     if not await redis_client.verify_oauth_state(state):
         logger.warning('Invalid OAuth state - possible CSRF attack')
-        raise HTTPException(status_code=400, detail='Invalid state parameter')
+        redirect_url = f'{frontend_callback}?{urlencode({"error": "invalid_state"})}'
+        return RedirectResponse(url=redirect_url)
 
     try:
         user, access_token = await auth_service.handle_github_callback(code, db)
 
         logger.info(f'User authenticated: {user.github_username}')
 
-        return {
-            'success': True,
-            'data': {
-                'access_token': access_token,
-                'token_type': 'bearer',
-                'user': user.to_dict(),
-            },
-            'message': 'Successfully authenticated with GitHub',
-        }
+        # Redirect to frontend with token
+        redirect_url = f'{frontend_callback}?{urlencode({"token": access_token})}'
+        return RedirectResponse(url=redirect_url)
 
     except ValueError as e:
         logger.error(f'OAuth callback failed: {e}')
-        raise HTTPException(status_code=400, detail=str(e))
+        redirect_url = f'{frontend_callback}?{urlencode({"error": "auth_failed", "message": str(e)})}'
+        return RedirectResponse(url=redirect_url)
     except Exception as e:
         logger.error(f'Unexpected error in OAuth callback: {e}', exc_info=True)
-        raise HTTPException(status_code=500, detail='Authentication failed')
+        redirect_url = f'{frontend_callback}?{urlencode({"error": "auth_failed"})}'
+        return RedirectResponse(url=redirect_url)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -113,15 +113,15 @@ async def gitlab_callback(
     """
     Handle GitLab OAuth callback.
 
-    Exchanges authorization code for access token and creates/updates user.
-
-    Returns:
-        JSON with access_token and user info
+    Exchanges authorization code for access token and redirects to frontend.
     """
+    frontend_callback = f'{settings.frontend_url}/auth/callback'
+
     # Verify state for CSRF protection
     if not await redis_client.verify_oauth_state(state):
         logger.warning('Invalid OAuth state - possible CSRF attack')
-        raise HTTPException(status_code=400, detail='Invalid state parameter')
+        redirect_url = f'{frontend_callback}?{urlencode({"error": "invalid_state"})}'
+        return RedirectResponse(url=redirect_url)
 
     try:
         user, access_token = await auth_service.handle_gitlab_callback(code, db)
@@ -129,22 +129,18 @@ async def gitlab_callback(
         username = user.gitlab_username or user.github_username
         logger.info(f'GitLab user authenticated: {username}')
 
-        return {
-            'success': True,
-            'data': {
-                'access_token': access_token,
-                'token_type': 'bearer',
-                'user': user.to_dict(),
-            },
-            'message': 'Successfully authenticated with GitLab',
-        }
+        # Redirect to frontend with token
+        redirect_url = f'{frontend_callback}?{urlencode({"token": access_token})}'
+        return RedirectResponse(url=redirect_url)
 
     except ValueError as e:
         logger.error(f'GitLab OAuth callback failed: {e}')
-        raise HTTPException(status_code=400, detail=str(e))
+        redirect_url = f'{frontend_callback}?{urlencode({"error": "auth_failed", "message": str(e)})}'
+        return RedirectResponse(url=redirect_url)
     except Exception as e:
         logger.error(f'Unexpected error in GitLab OAuth callback: {e}', exc_info=True)
-        raise HTTPException(status_code=500, detail='Authentication failed')
+        redirect_url = f'{frontend_callback}?{urlencode({"error": "auth_failed"})}'
+        return RedirectResponse(url=redirect_url)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -161,10 +157,7 @@ async def get_me(
 
     Requires valid JWT token in Authorization header.
     """
-    return {
-        'success': True,
-        'data': current_user.to_dict(),
-    }
+    return success_response(current_user.to_dict())
 
 
 @router.post('/logout')
@@ -179,7 +172,4 @@ async def logout(
     """
     logger.info(f'User logged out: {current_user.github_username}')
 
-    return {
-        'success': True,
-        'message': 'Successfully logged out',
-    }
+    return success_response(None, message='Successfully logged out')

@@ -392,3 +392,76 @@ class RepositoryService:
 
         await self.db.commit()
         logger.info(f'Index status updated: {repo.full_name} -> {status.value}')
+
+    async def activate_repo(self, repo_id: str) -> Repository:
+        """
+        Set a repository as active.
+
+        Only one repository can be active per user at a time.
+        Activating a repo will deactivate all other repos for this user.
+
+        Args:
+            repo_id: Repository ID to activate
+
+        Returns:
+            Updated Repository model
+
+        Raises:
+            ValueError: If repository not found
+        """
+        repo = await self.get_repo(repo_id)
+        if not repo:
+            raise ValueError('Repository not found')
+
+        # Deactivate all other repos for this user
+        all_repos = await self.list_added_repos()
+        for r in all_repos:
+            if r.is_active and r.id != repo.id:
+                r.is_active = False
+
+        # Activate the target repo
+        repo.is_active = True
+        await self.db.commit()
+        await self.db.refresh(repo)
+
+        logger.info(f'Repository activated: {repo.full_name}')
+        return repo
+
+    async def deactivate_repo(self, repo_id: str) -> Repository:
+        """
+        Deactivate a repository.
+
+        Args:
+            repo_id: Repository ID to deactivate
+
+        Returns:
+            Updated Repository model
+
+        Raises:
+            ValueError: If repository not found
+        """
+        repo = await self.get_repo(repo_id)
+        if not repo:
+            raise ValueError('Repository not found')
+
+        repo.is_active = False
+        await self.db.commit()
+        await self.db.refresh(repo)
+
+        logger.info(f'Repository deactivated: {repo.full_name}')
+        return repo
+
+    async def get_active_repo(self) -> Repository | None:
+        """
+        Get the currently active repository for the user.
+
+        Returns:
+            Active Repository or None if no repo is active
+        """
+        result = await self.db.execute(
+            select(Repository).where(
+                Repository.owner_id == self.user.id,
+                Repository.is_active == True,
+            )
+        )
+        return result.scalar_one_or_none()
