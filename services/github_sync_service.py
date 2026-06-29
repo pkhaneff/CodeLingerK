@@ -176,11 +176,6 @@ class GitHubSyncService:
         # Statistics
         if review.files_analyzed:
             parts.append(f'📁 **Files Analyzed:** {review.files_analyzed}')
-        if review.ai_tokens_used:
-            parts.append(f'🔤 **Tokens Used:** {review.ai_tokens_used:,}')
-        if review.processing_time_ms:
-            seconds = review.processing_time_ms / 1000
-            parts.append(f'⏱️ **Processing Time:** {seconds:.1f}s')
 
         parts.append('')
         parts.append('---')
