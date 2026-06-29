@@ -11,6 +11,7 @@ from urllib.parse import urlencode
 
 import httpx
 from jose import jwt, JWTError
+import bcrypt
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -38,14 +39,170 @@ class AuthService:
 
     Supported providers:
     - GitHub
-    - GitLab (gitlab.com)
-
-    Flow:
-        1. get_{provider}_auth_url() -> Redirect user to provider
-        2. handle_{provider}_callback(code) -> Exchange code for token, create user
-        3. create_access_token(user) -> Generate JWT
-        4. get_current_user(token) -> Validate JWT, return user
     """
+
+    def get_password_hash(self, password: str) -> str:
+        """Hash password using bcrypt."""
+        password_bytes = password.encode('utf-8')
+        salt = bcrypt.gensalt()
+        hashed = bcrypt.hashpw(password_bytes, salt)
+        return hashed.decode('utf-8')
+
+    def verify_password(self, plain_password: str, hashed_password: str) -> bool:
+        """Verify plain password against hashed password."""
+        try:
+            return bcrypt.checkpw(
+                plain_password.encode('utf-8'),
+                hashed_password.encode('utf-8')
+            )
+        except Exception:
+            return False
+
+    async def register_user(
+        self,
+        db: AsyncSession,
+        username: str,
+        email: str,
+        password: str,
+    ) -> User:
+        """Register a new user with local credentials."""
+        # Check if username or email already exists
+        result = await db.execute(
+            select(User).where((User.username == username) | (User.email == email))
+        )
+        if result.scalar_one_or_none():
+            raise ValueError("Username or email already exists")
+
+        # Get default user role (authority '2')
+        from models.role import Role
+        role_result = await db.execute(
+            select(Role).where(Role.authority == '2')
+        )
+        role = role_result.scalar_one_or_none()
+
+        hashed_password = self.get_password_hash(password)
+        user = User(
+            username=username,
+            email=email,
+            hashed_password=hashed_password,
+            role_id=role.id if role else None,
+            is_active=True,
+        )
+        db.add(user)
+        await db.commit()
+        await db.refresh(user)
+
+        # Eager load role relationship for API response serialization
+        from sqlalchemy.orm import selectinload
+        result = await db.execute(
+            select(User)
+            .options(selectinload(User.role))
+            .where(User.id == user.id)
+        )
+        return result.scalar_one()
+
+    async def authenticate_user(
+        self,
+        db: AsyncSession,
+        username_or_email: str,
+        password: str,
+    ) -> User | None:
+        """Authenticate user with username/email and password."""
+        from sqlalchemy.orm import selectinload
+        result = await db.execute(
+            select(User)
+            .options(selectinload(User.role))
+            .where(
+                ((User.username == username_or_email) | (User.email == username_or_email))
+                & (User.is_active == True)
+            )
+        )
+        user = result.scalar_one_or_none()
+        if not user:
+            return None
+
+        if not self.verify_password(password, user.hashed_password):
+            return None
+
+        return user
+
+    async def link_github_account(
+        self,
+        user_id: str,
+        code: str,
+        db: AsyncSession,
+    ) -> User:
+        """Link GitHub account to an existing user."""
+        github_token = await self._exchange_code_for_token(code)
+        github_user = await self._get_github_user(github_token)
+        github_id = github_user['id']
+
+        # Check if already linked to another account
+        result = await db.execute(
+            select(User).where(User.github_id == github_id, User.id != user_id)
+        )
+        if result.scalar_one_or_none():
+            raise ValueError("This GitHub account is already linked to another user.")
+
+        from sqlalchemy.orm import selectinload
+        user_result = await db.execute(
+            select(User)
+            .options(selectinload(User.role))
+            .where(User.id == user_id)
+        )
+        user = user_result.scalar_one_or_none()
+        if not user:
+            raise ValueError("User not found")
+
+        user.github_id = github_id
+        user.github_username = github_user['login']
+        user.github_email = github_user.get('email')
+        user.github_avatar_url = github_user.get('avatar_url')
+        user.github_access_token = github_token
+        user.updated_at = datetime.utcnow()
+
+        await db.commit()
+        await db.refresh(user)
+        return user
+
+    async def link_gitlab_account(
+        self,
+        user_id: str,
+        code: str,
+        db: AsyncSession,
+    ) -> User:
+        """Link GitLab account to an existing user."""
+        gitlab_token = await self._exchange_gitlab_code_for_token(code)
+        gitlab_user = await self._get_gitlab_user(gitlab_token)
+        gitlab_id = gitlab_user['id']
+
+        # Check if already linked to another account
+        result = await db.execute(
+            select(User).where(User.gitlab_id == gitlab_id, User.id != user_id)
+        )
+        if result.scalar_one_or_none():
+            raise ValueError("This GitLab account is already linked to another user.")
+
+        from sqlalchemy.orm import selectinload
+        user_result = await db.execute(
+            select(User)
+            .options(selectinload(User.role))
+            .where(User.id == user_id)
+        )
+        user = user_result.scalar_one_or_none()
+        if not user:
+            raise ValueError("User not found")
+
+        user.gitlab_id = gitlab_id
+        user.gitlab_username = gitlab_user['username']
+        user.gitlab_email = gitlab_user.get('email')
+        user.gitlab_avatar_url = gitlab_user.get('avatar_url')
+        user.gitlab_access_token = gitlab_token
+        user.updated_at = datetime.utcnow()
+
+        await db.commit()
+        await db.refresh(user)
+        return user
 
     def get_github_auth_url(self) -> tuple[str, str]:
         """
@@ -362,10 +519,12 @@ class AuthService:
 
         payload = {
             'sub': user.id,
-            'github_id': user.github_id,
-            'username': user.github_username,
+            'username': user.username,
+            'email': user.email,
+            'roles_id': user.role.authority if user.role else '2',
+            'type': 'access',
             'exp': expire,
-            'iat': datetime.utcnow(),
+            'iat': datetime.utcnow().timestamp(),
         }
 
         token = jwt.encode(
@@ -376,6 +535,63 @@ class AuthService:
 
         return token
 
+    def create_refresh_token(self, user: User) -> str:
+        """
+        Create JWT refresh token for user.
+        """
+        expire = datetime.utcnow() + timedelta(
+            days=settings.jwt_refresh_token_expire_days
+        )
+
+        payload = {
+            'sub': user.id,
+            'type': 'refresh',
+            'exp': expire,
+            'iat': datetime.utcnow().timestamp(),
+        }
+
+        token = jwt.encode(
+            payload,
+            settings.jwt_secret_key,
+            algorithm=settings.jwt_algorithm,
+        )
+
+        return token
+
+    async def blacklist_token(
+        self,
+        db: AsyncSession,
+        token: str,
+        user_id: str,
+        expires_at: datetime,
+    ) -> None:
+        """Add a token to the blacklist in database."""
+        from models.blacklisted_token import BlacklistedToken
+        # Make sure expires_at is timezone-naive if stored so
+        if expires_at.tzinfo is not None:
+            expires_at = expires_at.replace(tzinfo=None)
+
+        blacklisted = BlacklistedToken(
+            token=token,
+            user_id=user_id,
+            expires_at=expires_at,
+            blacklisted_at=datetime.utcnow()
+        )
+        db.add(blacklisted)
+        await db.commit()
+
+    async def is_token_blacklisted(
+        self,
+        db: AsyncSession,
+        token: str,
+    ) -> bool:
+        """Check if a token is in the database blacklist."""
+        from models.blacklisted_token import BlacklistedToken
+        result = await db.execute(
+            select(BlacklistedToken).where(BlacklistedToken.token == token)
+        )
+        return result.scalar_one_or_none() is not None
+
     async def get_current_user(
         self,
         token: str,
@@ -383,6 +599,8 @@ class AuthService:
     ) -> User | None:
         """
         Validate JWT token and return current user.
+
+        Checks blacklist database and user's last_logout timestamp.
 
         Args:
             token: JWT access token
@@ -392,20 +610,44 @@ class AuthService:
             User if token is valid, None otherwise
         """
         try:
+            # 1. Check blacklist
+            if await self.is_token_blacklisted(db, token):
+                return None
+
             payload = jwt.decode(
                 token,
                 settings.jwt_secret_key,
                 algorithms=[settings.jwt_algorithm],
             )
 
+            # 2. Check token type
+            token_type = payload.get('type')
+            if token_type != 'access':
+                return None
+
             user_id = payload.get('sub')
             if not user_id:
                 return None
 
+            from sqlalchemy.orm import selectinload
             result = await db.execute(
-                select(User).where(User.id == user_id, User.is_active == True)
+                select(User)
+                .options(selectinload(User.role))
+                .where(User.id == user_id, User.is_active == True)
             )
-            return result.scalar_one_or_none()
+            user = result.scalar_one_or_none()
+            if not user:
+                return None
+
+            # 3. Check last_logout validation
+            iat = payload.get('iat')
+            if user.last_logout and iat:
+                last_logout_ts = user.last_logout.timestamp()
+                if iat <= last_logout_ts:
+                    logger.debug("Token issued before last logout")
+                    return None
+
+            return user
 
         except JWTError as e:
             logger.debug(f'JWT validation failed: {e}')
@@ -414,12 +656,9 @@ class AuthService:
     async def logout(self, token: str) -> None:
         """
         Invalidate user session.
-
-        For now, JWT tokens are stateless. In production, you might
-        want to add token to a blacklist in Redis.
+        (Note: For route-level logout, we use db-backed blacklisting inside the API controller,
+        this method is retained for compatibility).
         """
-        # Optional: Add token to Redis blacklist
-        # await redis_client.set('blacklist', token, value='1', ttl_seconds=3600)
         pass
 
 

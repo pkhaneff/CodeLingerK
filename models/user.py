@@ -7,7 +7,7 @@ Supports GitHub and GitLab authentication.
 from datetime import datetime
 from uuid import uuid4
 
-from sqlalchemy import Boolean, DateTime, String, BigInteger
+from sqlalchemy import Boolean, DateTime, String, BigInteger, ForeignKey
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -50,9 +50,14 @@ class User(Base):
         default=lambda: str(uuid4()),
     )
 
+    # Local authentication fields
+    username: Mapped[str] = mapped_column(String(150), unique=True, nullable=False)
+    email: Mapped[str] = mapped_column(String(254), unique=True, nullable=False)
+    hashed_password: Mapped[str] = mapped_column(String(128), nullable=False)
+
     # GitHub OAuth fields
-    github_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False)
-    github_username: Mapped[str] = mapped_column(String(255), nullable=False)
+    github_id: Mapped[int | None] = mapped_column(BigInteger, unique=True, nullable=True)
+    github_username: Mapped[str | None] = mapped_column(String(255), nullable=True)
     github_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     github_avatar_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     github_access_token: Mapped[str | None] = mapped_column(String(500), nullable=True)
@@ -77,9 +82,23 @@ class User(Base):
         DateTime(timezone=True),
         nullable=True,
     )
+    last_logout: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_staff: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_superuser: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # Role relationship
+    role_id: Mapped[str | None] = mapped_column(
+        UUID(as_uuid=False),
+        ForeignKey('roles.id', ondelete='SET NULL'),
+        nullable=True,
+    )
 
     # Relationships
+    role: Mapped['Role | None'] = relationship('Role', back_populates='users')
     repositories: Mapped[list['Repository']] = relationship(
         'Repository',
         back_populates='owner',
@@ -87,14 +106,26 @@ class User(Base):
     )
 
     def __repr__(self) -> str:
-        username = self.github_username or self.gitlab_username or 'unknown'
+        username = self.username or self.github_username or self.gitlab_username or 'unknown'
         provider_id = self.github_id or self.gitlab_id or 'N/A'
         return f'<User {username} ({provider_id})>'
 
     def to_dict(self) -> dict:
         """Convert to dictionary for API responses."""
+        from sqlalchemy import inspect
+        state = inspect(self)
+        role_data = None
+        if 'role' not in state.unloaded:
+            role_data = self.role.to_dict() if self.role else None
+
         return {
             'id': self.id,
+            'username': self.username,
+            'email': self.email,
+            'is_active': self.is_active,
+            'is_staff': self.is_staff,
+            'is_superuser': self.is_superuser,
+            'role': role_data,
             # GitHub fields
             'github_id': self.github_id,
             'github_username': self.github_username,
@@ -108,6 +139,7 @@ class User(Base):
             # Timestamps
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'last_login_at': self.last_login_at.isoformat() if self.last_login_at else None,
+            'last_logout': self.last_logout.isoformat() if self.last_logout else None,
         }
 
     def get_access_token(self, provider: str) -> str | None:
@@ -125,3 +157,4 @@ class User(Base):
         elif provider == 'gitlab':
             return self.gitlab_id is not None
         return False
+
