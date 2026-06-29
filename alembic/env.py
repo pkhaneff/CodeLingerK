@@ -16,6 +16,8 @@ from infra.database import Base
 
 # Import all models so they are registered with Base.metadata
 from models.user import User
+from models.role import Role
+from models.blacklisted_token import BlacklistedToken
 from models.repository import Repository
 from models.review import Review
 

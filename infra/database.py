@@ -80,6 +80,8 @@ async def init_db() -> None:
     """Initialize database tables."""
     # Import models so they register with Base.metadata
     from models.user import User
+    from models.role import Role
+    from models.blacklisted_token import BlacklistedToken
     from models.repository import Repository
     from models.review import Review, ReviewComment
     from models.code_graph import (

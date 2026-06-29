@@ -54,15 +54,36 @@ async def get_optional_user(
     Dependency to optionally get current user.
 
     Returns None if no token provided, user if valid token.
-
-    Usage:
-        @router.get("/public")
-        async def public_route(user: User | None = Depends(get_optional_user)):
-            if user:
-                return {"message": f"Hello, {user.github_username}"}
-            return {"message": "Hello, anonymous"}
     """
     if not credentials:
         return None
 
     return await auth_service.get_current_user(credentials.credentials, db)
+
+
+class AuthorityChecker:
+    """FastAPI Dependency for Role-Based Access Control (RBAC)."""
+
+    def __init__(self, allowed_authorities: list[str]):
+        self.allowed_authorities = allowed_authorities
+
+    def __call__(self, user: User = Depends(get_current_user)) -> User:
+        if not user.role or user.role.authority not in self.allowed_authorities:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail='Forbidden: insufficient permissions',
+            )
+        return user
+
+
+def require_authority(allowed_authorities: list[str]) -> AuthorityChecker:
+    """
+    FastAPI dependency to enforce user roles/authorities.
+
+    Usage:
+        @router.post('/admin')
+        async def admin_route(admin: User = Depends(require_authority(['1']))):
+            ...
+    """
+    return AuthorityChecker(allowed_authorities)
+
