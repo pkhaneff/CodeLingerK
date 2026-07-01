@@ -79,12 +79,12 @@ async def get_db_context() -> AsyncGenerator[AsyncSession, None]:
 async def init_db() -> None:
     """Initialize database tables."""
     # Import models so they register with Base.metadata
-    from models.user import User
-    from models.role import Role
-    from models.blacklisted_token import BlacklistedToken
-    from models.repository import Repository
-    from models.review import Review, ReviewComment
-    from models.code_graph import (
+    from apps.auth.models.user import User
+    from apps.auth.models.role import Role
+    from apps.auth.models.blacklisted_token import BlacklistedToken
+    from apps.repositories.models.repository import Repository
+    from apps.ai_reviewer.models.review import Review, ReviewComment
+    from apps.code_analyzer.models.code_graph import (
         IndexedFile,
         Symbol,
         SymbolCall,

@@ -14,11 +14,11 @@ from core.logging_config import setup_logging, get_logger
 from infra.config import settings
 from infra.database import init_db, close_db
 from infra.redis_client import redis_client
-from api.routes.auth import router as auth_router
-from api.routes.webhooks import router as webhook_router
-from api.routes.repositories import router as repo_router
-from api.routes.graph import router as graph_router
-from api.routes.reviews import router as reviews_router
+from apps.auth.api.routes import router as auth_router
+from apps.ai_reviewer.api.webhooks import router as webhook_router
+from apps.repositories.api.routes import router as repo_router
+from apps.code_analyzer.api.routes import router as graph_router
+from apps.ai_reviewer.api.routes import router as reviews_router
 from worker import Worker
 
 setup_logging(level=settings.log_level)

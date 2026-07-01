@@ -11,11 +11,11 @@ from main import app
 from infra.database import get_db
 from infra.config import settings
 from infra.redis_client import redis_client
-from models.user import User
-from models.role import Role
-from services.auth_service import auth_service
-from api.middleware.auth import require_authority, get_current_user
-from api.responses import success_response
+from apps.auth.models.user import User
+from apps.auth.models.role import Role
+from apps.auth.services.auth_service import auth_service
+from apps.auth.api.middleware import require_authority, get_current_user
+from core.responses import success_response
 
 # ─────────────────────────────────────────────────────────────
 # Test Router Setup for RBAC verification
@@ -247,7 +247,7 @@ async def test_rbac_access_control(client, db_session):
     alice = result.scalar_one()
     
     # Get Admin role
-    from models.role import Role
+    from apps.auth.models.role import Role
     admin_role = (await db_session.execute(
         select(Role).where(Role.authority == "1")
     )).scalar_one()
