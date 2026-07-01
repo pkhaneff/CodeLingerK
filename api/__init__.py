@@ -1,3 +1,0 @@
-"""
-FastAPI application for CodeLingerK
-"""

@@ -22,9 +22,9 @@ from uuid import UUID
 from core.logging_config import setup_logging, get_logger
 from infra.database import get_db_context
 from infra.redis_client import redis_client
-from models.review_job import JobType
-from models.snapshot import Snapshot, SnapshotStatus
-from services.queue_service import QueueService
+from apps.ai_reviewer.models.review_job import JobType
+from apps.ai_reviewer.models.snapshot import Snapshot, SnapshotStatus
+from apps.ai_reviewer.services.queue_service import QueueService
 
 logger = get_logger(__name__)
 
@@ -173,7 +173,7 @@ class Worker:
         Uses ContextService to parse diff and build structured context.
         """
         from sqlalchemy import select
-        from services.context_service import ContextService
+        from apps.ai_reviewer.services.context_service import ContextService
 
         # Get snapshot
         result = await db.execute(
@@ -211,8 +211,8 @@ class Worker:
         Uses LayerService to classify files and create layer records.
         """
         from sqlalchemy import select
-        from services.context_service import ContextService
-        from services.layer_service import LayerService
+        from apps.ai_reviewer.services.context_service import ContextService
+        from apps.ai_reviewer.services.layer_service import LayerService
 
         # Get snapshot
         result = await db.execute(
@@ -260,9 +260,9 @@ class Worker:
         """
         from sqlalchemy import select
         from sqlalchemy.orm import selectinload
-        from services.context_service import ContextService
-        from services.layer_service import LayerService
-        from services.ai_review_service import AIReviewService
+        from apps.ai_reviewer.services.context_service import ContextService
+        from apps.ai_reviewer.services.layer_service import LayerService
+        from apps.ai_reviewer.services.ai_review_service import AIReviewService
 
         # Get snapshot with pull_request loaded
         result = await db.execute(
@@ -315,8 +315,8 @@ class Worker:
         """
         from sqlalchemy import select
         from sqlalchemy.orm import selectinload
-        from services.github_sync_service import GitHubSyncService
-        from services.ai_review_service import AIReviewService
+        from apps.ai_reviewer.services.github_sync_service import GitHubSyncService
+        from apps.ai_reviewer.services.ai_review_service import AIReviewService
 
         # Get snapshot with pull_request loaded
         result = await db.execute(

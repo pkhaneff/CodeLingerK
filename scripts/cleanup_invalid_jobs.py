@@ -10,7 +10,7 @@ import json
 from uuid import UUID
 
 from infra.redis_client import redis_client
-from models.review_job import JobType
+from apps.ai_reviewer.models.review_job import JobType
 
 
 async def is_valid_uuid(value: str) -> bool:

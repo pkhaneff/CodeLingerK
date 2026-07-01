@@ -5,9 +5,10 @@ from sqlalchemy import select
 
 from infra.database import get_db_context
 from infra.redis_client import redis_client
-from models import PullRequest, Snapshot, SnapshotStatus
-from services.queue_service import QueueService
-from models.review_job import JobType
+from apps.ai_reviewer.models.pull_request import PullRequest
+from apps.ai_reviewer.models.snapshot import Snapshot, SnapshotStatus
+from apps.ai_reviewer.services.queue_service import QueueService
+from apps.ai_reviewer.models.review_job import JobType
 
 
 @pytest_asyncio.fixture
@@ -19,7 +20,11 @@ async def db():
 @pytest_asyncio.fixture
 async def redis():
     await redis_client.connect()
+    if redis_client._client:
+        await redis_client._client.flushdb()
     yield redis_client
+    if redis_client._client:
+        await redis_client._client.flushdb()
     await redis_client.close()
 
 

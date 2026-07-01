@@ -15,11 +15,11 @@ from infra.config import settings
 from infra.database import Base
 
 # Import all models so they are registered with Base.metadata
-from models.user import User
-from models.role import Role
-from models.blacklisted_token import BlacklistedToken
-from models.repository import Repository
-from models.review import Review
+from apps.auth.models.user import User
+from apps.auth.models.role import Role
+from apps.auth.models.blacklisted_token import BlacklistedToken
+from apps.repositories.models.repository import Repository
+from apps.ai_reviewer.models.review import Review
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

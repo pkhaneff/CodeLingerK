@@ -1,6 +1,6 @@
 import pytest
 
-from services.ai_review_service import AIReviewService
+from apps.ai_reviewer.services.ai_review_service import AIReviewService
 
 
 class _FakeAIClient:
