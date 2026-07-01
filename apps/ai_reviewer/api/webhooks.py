@@ -139,7 +139,7 @@ async def process_pr_webhook(
     snapshot_service = SnapshotService(db, git_provider)
 
     # Create snapshot (idempotent - returns existing if same commit)
-    snapshot = await snapshot_service.create_snapshot(
+    snapshot, created = await snapshot_service.create_snapshot(
         repository=repo,
         pr_number=payload.pr_number,
         commit_sha=payload.head_sha,
@@ -151,8 +151,31 @@ async def process_pr_webhook(
 
     logger.info(
         f'Snapshot created: {snapshot.id[:8]} for PR #{payload.pr_number} '
-        f'@ {payload.head_sha[:8]}'
+        f'@ {payload.head_sha[:8]} (newly created: {created})'
     )
+
+    from apps.ai_reviewer.models.snapshot import SnapshotStatus
+
+    if not created and snapshot.status not in (SnapshotStatus.FAILED.value,):
+        logger.info(
+            f'Snapshot {snapshot.id[:8]} already exists with status {snapshot.status}. '
+            f'Skipping queueing duplicate pipeline.'
+        )
+        return {
+            'status': 'skipped',
+            'reason': f'Snapshot already exists with status: {snapshot.status}',
+            'provider': provider.value,
+            'pr_number': payload.pr_number,
+            'commit_sha': payload.head_sha,
+            'snapshot_id': str(snapshot.id),
+        }
+
+    # If the snapshot previously failed and we are reprocessing it, reset its status to pending
+    if not created and snapshot.status == SnapshotStatus.FAILED.value:
+        logger.info(f'Retrying failed snapshot {snapshot.id[:8]} from webhook event')
+        snapshot.status = SnapshotStatus.PENDING.value
+        snapshot.error_message = None
+        await db.flush()
 
     # ─────────────────────────────────────────────────────────────
     # Phase 2: Enqueue for Processing
