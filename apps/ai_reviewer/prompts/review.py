@@ -110,15 +110,35 @@ Respond with a JSON object:
 
 
 def get_comments_prompt() -> str:
-    """Return prompt template for comments pass."""
-    return """You are generating actionable code review comments.
+    """Return prompt template for comments pass.
+
+    Enforces the V1 architecture comment template:
+        Issue → Evidence → Impact → Suggestion
+
+    Each generated comment must have:
+    - explanation: The issue title + Evidence (exact file/line quote or reference)
+    - impact: What breaks / who is affected if not fixed
+    - suggestion: Concrete, actionable fix with code example if possible
+    """
+    return """You are generating structured, evidence-backed code review comments.
 Based on all previous analysis, generate specific inline comments.
+
+MANDATORY OUTPUT STRUCTURE:
+Each comment MUST follow this exact 4-part template:
+  1. ISSUE:      What is wrong (1 sentence, specific, no vague language)
+  2. EVIDENCE:   Exact code reference — quote the problematic line(s) or reference line numbers
+  3. IMPACT:     What breaks, who is affected, what is the worst-case outcome
+  4. SUGGESTION: Concrete fix with example code if possible
+
+Format each comment's "explanation" field as:
+  "[Issue] <one-sentence description of what is wrong>\n[Evidence] line X in file.py: `<code>`  — <optional additional context>\n[Impact] <consequence if not fixed>\n[Suggestion] <fix with code example>"
 
 CRITICAL GROUNDING RULES:
 - ONLY reference file_path values that LITERALLY appear in "## Changed Files" section.
 - ONLY use line_start values from the diff hunk headers: @@ -old,count +NEW_START,count @@
 - The line_start must be within the range [NEW_START, NEW_START + count] for added/modified lines.
 - If you cannot determine the exact line, OMIT line_start/line_end rather than guessing.
+- The "suggestion" field must be a standalone, actionable recommendation.
 - If no issues warrant comments, return an empty array []. Do NOT fabricate issues.
 - Output ONLY valid JSON array. No markdown fences, no explanation, no preamble.
 
@@ -130,19 +150,19 @@ Respond with a JSON array:
     "line_end": null,
     "severity": "warning",
     "category": "security",
-    "explanation": "Why this is an issue",
-    "suggestion": "How to fix it",
-    "confidence": 0.85
+    "explanation": "[Issue] retry_count is never incremented inside the retry loop.\n[Evidence] line 42 in worker.py: `while retry_count < MAX_RETRIES:`  — but retry_count is never updated.\n[Impact] The loop will run forever if the operation keeps failing, causing a hang/OOM.\n[Suggestion] Add `retry_count += 1` at the bottom of the loop body.",
+    "suggestion": "Add `retry_count += 1` at the bottom of the retry loop body to prevent infinite loops.",
+    "confidence": 0.92
   }
 ]
 
 RULES:
 - Max 5 comments per file, Max 20 comments total
-- Focus on most impactful issues only
+- Focus on most impactful issues only (prefer security > bug > performance > design)
 - severity: info | warning | error | critical
 - category: bug | security | performance | design | maintainability | testing
 - confidence calibration:
-  * 0.9-1.0: Definite bug/issue, can be reproduced
-  * 0.7-0.9: High confidence, clear violation of best practice
+  * 0.9-1.0: Definite bug/issue, reproducible with the provided evidence
+  * 0.7-0.9: High confidence, clear violation of best practice with evidence
   * 0.5-0.7: Moderate confidence, needs more context to confirm
-  * <0.5: Stylistic/opinion, reviewer should verify"""
+  * <0.5: DO NOT include — stylistic opinions should be dropped"""

@@ -7,6 +7,7 @@ SnapshotService creates an immutable snapshot of the PR state at that commit.
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import IntegrityError
 
 from core.logging_config import get_logger
 from apps.ai_reviewer.models.pull_request import PullRequest, PullRequestStatus
@@ -120,8 +121,35 @@ class SnapshotService:
             html_url=html_url,
         )
 
-        self.db.add(pull_request)
-        await self.db.flush()
+        try:
+            async with self.db.begin_nested():
+                self.db.add(pull_request)
+                await self.db.flush()
+        except IntegrityError:
+            # PR already created by a concurrent request, get it
+            result = await self.db.execute(
+                select(PullRequest).where(
+                    PullRequest.repository_id == repository.id,
+                    PullRequest.pr_number == pr_number,
+                )
+            )
+            existing = result.scalar_one()
+
+            # Update fields if provided
+            if title:
+                existing.title = title
+            if source_branch:
+                existing.source_branch = source_branch
+            if target_branch:
+                existing.target_branch = target_branch
+            if author:
+                existing.author = author
+            if html_url:
+                existing.html_url = html_url
+
+            await self.db.flush()
+            return existing
+
         await self.db.refresh(pull_request)
 
         logger.info(f'Created PullRequest #{pr_number} for {repository.full_name}')
@@ -159,7 +187,7 @@ class SnapshotService:
         target_branch: str | None = None,
         title: str | None = None,
         author: str | None = None,
-    ) -> Snapshot:
+    ) -> tuple[Snapshot, bool]:
         """
         Create immutable snapshot of PR state.
 
@@ -173,7 +201,7 @@ class SnapshotService:
             author: PR author (optional)
 
         Returns:
-            Created Snapshot model
+            Tuple of (Snapshot model, created boolean)
 
         Raises:
             ValueError: If snapshot already exists for this commit
@@ -198,7 +226,7 @@ class SnapshotService:
                     Snapshot.commit_sha == commit_sha,
                 )
             )
-            return result.scalar_one()
+            return result.scalar_one(), False
 
         # Fetch PR files and diff from GitHub
         try:
@@ -229,8 +257,25 @@ class SnapshotService:
             status=SnapshotStatus.PENDING.value,
         )
 
-        self.db.add(snapshot)
-        await self.db.flush()
+        try:
+            async with self.db.begin_nested():
+                self.db.add(snapshot)
+                await self.db.flush()
+        except IntegrityError:
+            # Snapshot already created by concurrent request, fetch it
+            result = await self.db.execute(
+                select(Snapshot).where(
+                    Snapshot.pull_request_id == pull_request.id,
+                    Snapshot.commit_sha == commit_sha,
+                )
+            )
+            snapshot = result.scalar_one()
+            logger.info(
+                f'Concurrent snapshot creation conflict resolved. '
+                f'Using existing snapshot for PR #{pr_number} @ {commit_sha[:8]}'
+            )
+            return snapshot, False
+
         await self.db.refresh(snapshot)
 
         logger.info(
@@ -238,7 +283,7 @@ class SnapshotService:
             f'{len(files_changed)} files, +{additions}/-{deletions}'
         )
 
-        return snapshot
+        return snapshot, True
 
     def _build_diff_content(self, pr_files: list[dict]) -> str:
         """
