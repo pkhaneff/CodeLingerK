@@ -5,6 +5,8 @@ from sqlalchemy import select
 
 from infra.database import get_db_context
 from infra.redis_client import redis_client
+from apps.auth.models.user import User
+from apps.repositories.models.repository import Repository
 from apps.ai_reviewer.models.pull_request import PullRequest
 from apps.ai_reviewer.models.snapshot import Snapshot, SnapshotStatus
 from apps.ai_reviewer.services.queue_service import QueueService

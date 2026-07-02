@@ -130,6 +130,7 @@ class Worker:
         # Route to appropriate handler
         if job_type == JobType.CONTEXT.value:
             result = await self._process_context(db, snapshot_id)
+            await db.commit()
             # Enqueue next job in pipeline
             await queue_service.enqueue(
                 JobType.LAYER,
@@ -139,6 +140,7 @@ class Worker:
 
         elif job_type == JobType.LAYER.value:
             result = await self._process_layer(db, snapshot_id)
+            await db.commit()
             await queue_service.enqueue(
                 JobType.REVIEW,
                 snapshot_id,
@@ -147,6 +149,7 @@ class Worker:
 
         elif job_type == JobType.REVIEW.value:
             result = await self._process_review(db, snapshot_id)
+            await db.commit()
             await queue_service.enqueue(
                 JobType.PUBLISH,
                 snapshot_id,
@@ -155,6 +158,7 @@ class Worker:
 
         elif job_type == JobType.PUBLISH.value:
             result = await self._process_publish(db, snapshot_id)
+            await db.commit()
             # No next job - pipeline complete
 
         else:
