@@ -1,0 +1,13 @@
+diff --git a/auth.py b/auth.py
+index e69de29..4f5a34e 100644
+--- a/auth.py
++++ b/auth.py
+@@ -1,7 +1,6 @@
+ import jwt
+ import datetime
+-import os
+ 
+-SECRET_KEY = os.environ.get("JWT_SECRET_KEY")
++SECRET_KEY = "super-secret-jwt-key-123"
+ 
+ def generate_token(user_id: int) -> str:

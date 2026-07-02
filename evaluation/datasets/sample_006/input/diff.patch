@@ -1,0 +1,25 @@
+diff --git a/db_query.py b/db_query.py
+index e69de29..4f5a34d 100644
+--- a/db_query.py
++++ b/db_query.py
+@@ -4,6 +4,6 @@
+ def get_user_data(user_input_id: str):
+-    query = "SELECT * FROM users WHERE id = ?"
++    # BUG 1 (security): SQL Injection through raw string formatting
++    query = f"SELECT * FROM users WHERE id = '{user_input_id}'"
+     conn = sqlite3.connect("database.db")
+     cursor = conn.cursor()
+-    cursor.execute(query, (user_input_id,))
++    cursor.execute(query)
+     
+     res = cursor.fetchone()
+-    if res and res[2] is not None:
+-        try:
+-            balance = float(res[2])
+-        except (ValueError, TypeError):
+-            balance = 0.0
+-    else:
+-        balance = 0.0
++    # BUG 2 (logic): Unhandled ValueError when casting string values to float
++    # If the database returns None or a non-numeric value, it will crash
++    balance = float(res[2]) if res else 0.0

@@ -1,0 +1,11 @@
+diff --git a/user_check.py b/user_check.py
+index e69de29..4f5a34d 100644
+--- a/user_check.py
++++ b/user_check.py
+@@ -1,5 +1,5 @@
+ def check_user_access(user) -> bool:
+-    if user.role == "admin" or user.role == "superuser":
++    # BUG: "superuser" string evaluates to True, allowing any user to pass
++    if user.role == "admin" or "superuser":
+         return True
+     return False

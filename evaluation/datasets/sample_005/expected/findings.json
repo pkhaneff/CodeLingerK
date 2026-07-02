@@ -1,0 +1,15 @@
+[
+  {
+    "id": "BUG-005",
+    "file": "finance.py",
+    "line_start": 4,
+    "line_end": 4,
+    "severity": "high",
+    "category": "bug-risk",
+    "message": "Using float data type for currency calculations can introduce floating-point precision issues (e.g., representation errors where 0.1 + 0.2 equals 0.30000000000000004). Financial transactions should always use decimal.Decimal to ensure exact math.",
+    "evidence": [
+      "total = balance + (transaction_amount * tax_rate)"
+    ],
+    "confidence": 1.0
+  }
+]

@@ -1,0 +1,14 @@
+diff --git a/finance.py b/finance.py
+index e69de29..4f5a34e 100644
+--- a/finance.py
++++ b/finance.py
+@@ -1,5 +1,4 @@
+-from decimal import Decimal
+ 
+-def calculate_total_balance(balance: Decimal, transaction_amount: Decimal, tax_rate: Decimal) -> Decimal:
+-    total = balance + (transaction_amount * tax_rate)
++def calculate_total_balance(balance: float, transaction_amount: float, tax_rate: float) -> float:
++    # BUG: Float arithmetic causes representation errors in currency
++    # E.g. 0.1 + 0.2 != 0.3. Use Decimal instead of float for currency.
++    total = balance + (transaction_amount * tax_rate)
+     return total

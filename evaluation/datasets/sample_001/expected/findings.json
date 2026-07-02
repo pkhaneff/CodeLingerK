@@ -1,0 +1,15 @@
+[
+  {
+    "id": "BUG-001",
+    "file": "auth.py",
+    "line_start": 4,
+    "line_end": 4,
+    "severity": "critical",
+    "category": "security",
+    "message": "JWT secret key is hardcoded directly in the source file instead of being loaded from an environment variable.",
+    "evidence": [
+      "SECRET_KEY = \"super-secret-jwt-key-123\""
+    ],
+    "confidence": 1.0
+  }
+]

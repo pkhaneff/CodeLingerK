@@ -1,0 +1,15 @@
+[
+  {
+    "id": "BUG-003",
+    "file": "process_users.py",
+    "line_start": 13,
+    "line_end": 13,
+    "severity": "medium",
+    "category": "performance",
+    "message": "Performing membership lookup ('not in') against a list inside a loop has O(N) complexity per lookup, resulting in O(N*M) total complexity. Converting the list 'banned' to a set before the loop would reduce lookup complexity to O(1), and total complexity to O(N + M).",
+    "evidence": [
+      "if uid not in banned:"
+    ],
+    "confidence": 1.0
+  }
+]
