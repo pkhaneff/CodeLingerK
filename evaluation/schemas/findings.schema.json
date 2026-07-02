@@ -1,0 +1,99 @@
+{
+  "$defs": {
+    "CategoryEnum": {
+      "enum": [
+        "security",
+        "logic",
+        "performance",
+        "maintainability",
+        "bug-risk"
+      ],
+      "title": "CategoryEnum",
+      "type": "string"
+    },
+    "GroundTruthFinding": {
+      "properties": {
+        "id": {
+          "description": "Unique finding ID, e.g., BUG-001",
+          "pattern": "^BUG-\\d{3,4}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "file": {
+          "description": "Relative file path from repo root",
+          "title": "File",
+          "type": "string"
+        },
+        "line_start": {
+          "description": "Start line in the head commit file",
+          "minimum": 1,
+          "title": "Line Start",
+          "type": "integer"
+        },
+        "line_end": {
+          "description": "End line in the head commit file",
+          "minimum": 1,
+          "title": "Line End",
+          "type": "integer"
+        },
+        "severity": {
+          "$ref": "#/$defs/SeverityEnum",
+          "description": "Impact severity"
+        },
+        "category": {
+          "$ref": "#/$defs/CategoryEnum",
+          "description": "Bug classification"
+        },
+        "message": {
+          "description": "Clear explanation of the bug",
+          "title": "Message",
+          "type": "string"
+        },
+        "evidence": {
+          "description": "Specific code snippets or tokens that serve as evidence of the bug",
+          "items": {
+            "type": "string"
+          },
+          "title": "Evidence",
+          "type": "array"
+        },
+        "confidence": {
+          "default": 1.0,
+          "description": "Annotation confidence",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Confidence",
+          "type": "number"
+        }
+      },
+      "required": [
+        "id",
+        "file",
+        "line_start",
+        "line_end",
+        "severity",
+        "category",
+        "message",
+        "evidence"
+      ],
+      "title": "GroundTruthFinding",
+      "type": "object"
+    },
+    "SeverityEnum": {
+      "enum": [
+        "critical",
+        "high",
+        "medium",
+        "low"
+      ],
+      "title": "SeverityEnum",
+      "type": "string"
+    }
+  },
+  "items": {
+    "$ref": "#/$defs/GroundTruthFinding"
+  },
+  "title": "RootModel[List[GroundTruthFinding]]",
+  "type": "array",
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

@@ -1,0 +1,28 @@
+[
+  {
+    "id": "BUG-006",
+    "file": "db_query.py",
+    "line_start": 5,
+    "line_end": 5,
+    "severity": "critical",
+    "category": "security",
+    "message": "Raw SQL query is built using f-string interpolation, creating a SQL Injection vulnerability. Parameterized queries should always be used to separate SQL commands from user inputs.",
+    "evidence": [
+      "query = f\"SELECT * FROM users WHERE id = '{user_input_id}'\""
+    ],
+    "confidence": 1.0
+  },
+  {
+    "id": "BUG-007",
+    "file": "db_query.py",
+    "line_start": 13,
+    "line_end": 13,
+    "severity": "medium",
+    "category": "logic",
+    "message": "Converting database query results directly to float without input validation or try-except handling is dangerous. If res[2] is None, an empty string, or non-numeric, a ValueError or TypeError will crash the program.",
+    "evidence": [
+      "balance = float(res[2]) if res else 0.0"
+    ],
+    "confidence": 1.0
+  }
+]

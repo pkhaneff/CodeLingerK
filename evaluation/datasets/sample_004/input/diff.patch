@@ -1,0 +1,11 @@
+diff --git a/cart.py b/cart.py
+index e69de29..4f5a34e 100644
+--- a/cart.py
++++ b/cart.py
+@@ -4,3 +4,3 @@
+ class ShoppingCart:
+-    def __init__(self, items: Optional[List[str]] = None):
+-        self.items = items if items is not None else []
++    # BUG: Mutable default arguments are shared across all instances
++    def __init__(self, items: List[str] = []):
++        self.items = items

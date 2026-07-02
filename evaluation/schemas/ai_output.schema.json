@@ -1,0 +1,60 @@
+{
+  "$defs": {
+    "AIFinding": {
+      "properties": {
+        "file": {
+          "description": "Relative file path",
+          "title": "File",
+          "type": "string"
+        },
+        "line_start": {
+          "description": "Start line of the finding",
+          "minimum": 1,
+          "title": "Line Start",
+          "type": "integer"
+        },
+        "line_end": {
+          "description": "End line of the finding",
+          "minimum": 1,
+          "title": "Line End",
+          "type": "integer"
+        },
+        "category": {
+          "$ref": "#/$defs/CategoryEnum",
+          "description": "Bug classification"
+        },
+        "message": {
+          "description": "Review comments",
+          "title": "Message",
+          "type": "string"
+        }
+      },
+      "required": [
+        "file",
+        "line_start",
+        "line_end",
+        "category",
+        "message"
+      ],
+      "title": "AIFinding",
+      "type": "object"
+    },
+    "CategoryEnum": {
+      "enum": [
+        "security",
+        "logic",
+        "performance",
+        "maintainability",
+        "bug-risk"
+      ],
+      "title": "CategoryEnum",
+      "type": "string"
+    }
+  },
+  "items": {
+    "$ref": "#/$defs/AIFinding"
+  },
+  "title": "RootModel[List[AIFinding]]",
+  "type": "array",
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

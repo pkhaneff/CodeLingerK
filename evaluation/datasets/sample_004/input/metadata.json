@@ -1,0 +1,9 @@
+{
+  "sample_id": "sample_004",
+  "language": "python",
+  "repo": "backend",
+  "base_commit": "d4e5f67890a1b2c3",
+  "head_commit": "e5f67890a1b2c3d4",
+  "pr_size_lines": 3,
+  "created_at": "2026-07-02"
+}

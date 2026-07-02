@@ -1,0 +1,15 @@
+[
+  {
+    "id": "BUG-004",
+    "file": "cart.py",
+    "line_start": 5,
+    "line_end": 5,
+    "severity": "medium",
+    "category": "maintainability",
+    "message": "Using a mutable default argument (like a list `[]`) in python is dangerous. The default list is instantiated only once when the function is defined, meaning all instances of ShoppingCart created without arguments will share the same list instance, leading to state pollution across objects.",
+    "evidence": [
+      "def __init__(self, items: List[str] = []):"
+    ],
+    "confidence": 1.0
+  }
+]
