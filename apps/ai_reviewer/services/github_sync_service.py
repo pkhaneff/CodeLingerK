@@ -6,6 +6,7 @@ Tracks sync status and handles errors gracefully.
 """
 
 from datetime import datetime
+import re
 from typing import Any
 
 from sqlalchemy import select
@@ -183,49 +184,148 @@ class GitHubSyncService:
 
         return '\n'.join(parts)
 
+    def _parse_explanation(self, explanation: str) -> dict:
+        """Parse raw explanation into sections (Issue, Evidence, Impact, Suggestion)."""
+        sections = {}
+        patterns = {
+            'issue': r'\[Issue\]\s*(.*?)(?=\[Evidence\]|\[Impact\]|\[Suggestion\]|$)',
+            'evidence': r'\[Evidence\]\s*(.*?)(?=\[Issue\]|\[Impact\]|\[Suggestion\]|$)',
+            'impact': r'\[Impact\]\s*(.*?)(?=\[Issue\]|\[Evidence\]|\[Suggestion\]|$)',
+            'suggestion': r'\[Suggestion\]\s*(.*?)(?=\[Issue\]|\[Evidence\]|\[Impact\]|$)'
+        }
+        for key, pattern in patterns.items():
+            match = re.search(pattern, explanation, re.DOTALL | re.IGNORECASE)
+            if match:
+                sections[key] = match.group(1).strip()
+        return sections
+
+    def _parse_evidence(self, evidence_text: str) -> dict | None:
+        """Extract line number, file name, code snippet, and context from Evidence section."""
+        pattern = r'line\s+(\d+)\s+in\s+([^\s:]+):\s*(`*)(.*?)\3(?:\s*(?:—|–|--)\s*(.*))?$'
+        match = re.search(pattern, evidence_text, re.DOTALL)
+        if not match:
+            return None
+        
+        line_num = match.group(1)
+        file_path = match.group(2)
+        code_snippet = match.group(4).strip()
+        context = match.group(5).strip() if match.group(5) else ""
+        
+        return {
+            'line': line_num,
+            'file': file_path,
+            'code': code_snippet,
+            'context': context
+        }
+
+    def _get_language_from_filename(self, filename: str) -> str:
+        """Get syntax highlighting language name from filename extension."""
+        ext = filename.split('.')[-1].lower() if '.' in filename else ''
+        mapping = {
+            'py': 'python',
+            'js': 'javascript',
+            'jsx': 'javascript',
+            'ts': 'typescript',
+            'tsx': 'typescript',
+            'go': 'go',
+            'rs': 'rust',
+            'java': 'java',
+            'c': 'c',
+            'cpp': 'cpp',
+            'h': 'c',
+            'hpp': 'cpp',
+            'cs': 'csharp',
+            'rb': 'ruby',
+            'php': 'php',
+            'sh': 'bash',
+            'yml': 'yaml',
+            'yaml': 'yaml',
+            'json': 'json',
+            'md': 'markdown',
+            'html': 'html',
+            'css': 'css',
+            'sql': 'sql',
+        }
+        return mapping.get(ext, '')
+
     def _convert_comments(
         self,
         comments: list[ReviewComment],
     ) -> list[ProviderReviewComment]:
-        """Convert ReviewComment models to provider format."""
+        """Convert ReviewComment models to provider format with rich Markdown."""
         provider_comments: list[ProviderReviewComment] = []
 
         for comment in comments:
-            # Build comment body with severity and suggestion
             body_parts = []
 
             # Severity badge
             severity_badge = {
-                'critical': '🚨 **Critical:**',
-                'error': '❌ **Error:**',
-                'warning': '⚠️ **Warning:**',
-                'info': 'ℹ️ **Info:**',
+                'critical': '🚨 **Critical**',
+                'error': '❌ **Error**',
+                'warning': '⚠️ **Warning**',
+                'info': 'ℹ️ **Info**',
             }
-            badge = severity_badge.get(comment.severity, '📝')
-            body_parts.append(f'{badge}')
-            body_parts.append('')
+            badge = severity_badge.get(comment.severity.lower(), '📝 **Review**')
+            category_str = f" • **{comment.category}**" if comment.category else ""
+            
+            body_parts.append(f"### {badge}{category_str}")
+            body_parts.append("")
 
-            # Category if available
-            if comment.category:
-                body_parts.append(f'**Category:** {comment.category}')
-                body_parts.append('')
+            # Try parsing the structured explanation
+            sections = self._parse_explanation(comment.comment)
 
-            # Main comment
-            body_parts.append(comment.comment)
+            if sections and 'issue' in sections:
+                # Issue section
+                body_parts.append(f"> 🎯 **Issue**\n> {sections['issue']}")
+                body_parts.append("")
 
-            # Suggestion if available
+                # Evidence section
+                if 'evidence' in sections:
+                    evidence_data = self._parse_evidence(sections['evidence'])
+                    if evidence_data:
+                        lang = self._get_language_from_filename(evidence_data['file'])
+                        body_parts.append(f"> 🔍 **Evidence** (File `{evidence_data['file']}`, Line {evidence_data['line']})")
+                        body_parts.append(f"> ```{lang}")
+                        for line in evidence_data['code'].split('\n'):
+                            body_parts.append(f"> {line}")
+                        body_parts.append(f"> ```")
+                        if evidence_data['context']:
+                            body_parts.append(f"> *{evidence_data['context']}*")
+                    else:
+                        body_parts.append(f"> 🔍 **Evidence**\n> {sections['evidence']}")
+                    body_parts.append("")
+
+                # Impact section
+                if 'impact' in sections:
+                    body_parts.append(f"> 💥 **Impact**\n> {sections['impact']}")
+                    body_parts.append("")
+
+                # Suggestion section
+                if 'suggestion' in sections:
+                    body_parts.append(f"> 💡 **Suggestion**\n> {sections['suggestion']}")
+                    body_parts.append("")
+            else:
+                # Fallback to raw comment if parsing fails
+                body_parts.append(comment.comment)
+                body_parts.append("")
+
+            # Suggestion code block if available and not redundant
             if comment.suggestion:
-                body_parts.append('')
-                body_parts.append('**Suggestion:**')
-                body_parts.append(f'```')
-                body_parts.append(comment.suggestion)
-                body_parts.append('```')
+                suggestion_clean = comment.suggestion.strip()
+                sections_suggestion = sections.get('suggestion', '').strip()
+                
+                if suggestion_clean != sections_suggestion:
+                    lang = self._get_language_from_filename(comment.file_path)
+                    body_parts.append("**Proposed Fix:**")
+                    body_parts.append(f"```{lang}")
+                    body_parts.append(comment.suggestion)
+                    body_parts.append("```")
+                    body_parts.append("")
 
             # Confidence
             if comment.confidence:
-                body_parts.append('')
                 confidence_pct = int(comment.confidence * 100)
-                body_parts.append(f'*Confidence: {confidence_pct}%*')
+                body_parts.append(f"*Confidence: {confidence_pct}%*")
 
             provider_comment: ProviderReviewComment = {
                 'path': comment.file_path,

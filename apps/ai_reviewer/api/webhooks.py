@@ -185,6 +185,9 @@ async def process_pr_webhook(
     # Calculate priority based on PR size
     priority = snapshot_service.calculate_priority(snapshot)
 
+    # Commit the transaction to ensure snapshot and metadata are saved
+    await db.commit()
+
     # Enqueue the first job in pipeline (CONTEXT)
     job_id = await queue_service.enqueue(
         job_type=JobType.CONTEXT,
@@ -197,9 +200,6 @@ async def process_pr_webhook(
             'owner_id': str(owner.id),
         },
     )
-
-    # Commit the transaction
-    await db.commit()
 
     logger.info(
         f'Queued job {job_id[:8]} for snapshot {snapshot.id[:8]} '

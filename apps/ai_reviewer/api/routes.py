@@ -411,7 +411,7 @@ async def retry_snapshot(
     # Reset status and enqueue
     snapshot.status = 'pending'
     snapshot.error_message = None
-    await db.flush()
+    await db.commit()
 
     queue_service = QueueService(db)
     job_id = await queue_service.enqueue(
@@ -419,8 +419,6 @@ async def retry_snapshot(
         snapshot_id=snapshot_id,
         priority=90,  # High priority for retry
     )
-
-    await db.commit()
 
     return success_response(
         {'job_id': job_id},
