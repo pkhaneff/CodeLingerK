@@ -109,6 +109,35 @@ Respond with a JSON object:
 }"""
 
 
+def get_category_prompt() -> str:
+    return """- category: Must be one of the following. If an issue could match multiple categories,
+    use this priority order: security > bug > performance > design > maintainability > testing.
+
+    * security: Security vulnerabilities, hardcoded secrets, SQL/command injection, XSS,
+      missing authentication/authorization checks, unsafe deserialization, unsafe dependency
+      usage. Takes priority over "bug" even if the vulnerability stems from faulty logic.
+
+    * bug: Functional/logical correctness issues with no security implication — runtime
+      exceptions, incorrect logic, edge case handling errors, infinite loops, off-by-one/index
+      errors, incorrect business logic implementation.
+
+    * performance: CPU/memory inefficiencies, slow database queries (e.g. N+1 queries),
+      resource/connection leaks, lack of caching, inefficient data structures/algorithms.
+      Applies even if the code is functionally correct.
+
+    * design: Architectural/structural flaws spanning multiple components — SOLID violations,
+      tight coupling, wrong layer responsibility, flawed API/module contracts. Does NOT include
+      issues confined to a single function's internal logic (see maintainability).
+
+    * maintainability: Issues confined within a function/class — high cyclomatic complexity,
+      poor naming, code duplication (DRY), missing docstrings on non-trivial logic, dead code,
+      overly long methods.
+
+    * testing: Missing/inadequate test coverage, incorrect assertions, missing edge cases in
+      test files, improper mocks. Only applies to test files, not to missing tests as a
+      property of production code (that falls under maintainability or design)."""
+
+
 def get_comments_prompt() -> str:
     """Return prompt template for comments pass.
 
@@ -120,7 +149,7 @@ def get_comments_prompt() -> str:
     - impact: What breaks / who is affected if not fixed
     - suggestion: Concrete, actionable fix with code example if possible
     """
-    return """You are generating structured, evidence-backed code review comments.
+    prompt = """You are generating structured, evidence-backed code review comments.
 Based on all previous analysis, generate specific inline comments.
 
 MANDATORY OUTPUT STRUCTURE:
@@ -150,7 +179,7 @@ Respond with a JSON array:
     "line_end": null,
     "severity": "warning",
     "category": "security",
-    "explanation": "[Issue] retry_count is never incremented inside the retry loop.\n[Evidence] line 42 in worker.py: `while retry_count < MAX_RETRIES:`  — but retry_count is never updated.\n[Impact] The loop will run forever if the operation keeps failing, causing a hang/OOM.\n[Suggestion] Add `retry_count += 1` at the bottom of the loop body.",
+    "explanation": "[Issue] retry_count is never incremented inside the retry loop.\\n[Evidence] line 42 in worker.py: `while retry_count < MAX_RETRIES:`  — but retry_count is never updated.\\n[Impact] The loop will run forever if the operation keeps failing, causing a hang/OOM.\\n[Suggestion] Add `retry_count += 1` at the bottom of the loop body.",
     "suggestion": "Add `retry_count += 1` at the bottom of the retry loop body to prevent infinite loops.",
     "confidence": 0.92
   }
@@ -166,3 +195,7 @@ RULES:
   * 0.7-0.9: High confidence, clear violation of best practice with evidence
   * 0.5-0.7: Moderate confidence, needs more context to confirm
   * <0.5: DO NOT include — stylistic opinions should be dropped"""
+    return prompt.replace(
+        "- category: bug | security | performance | design | maintainability | testing",
+        get_category_prompt()
+    )

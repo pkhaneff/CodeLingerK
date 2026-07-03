@@ -52,6 +52,29 @@ from apps.code_analyzer.services.static_analysis_service import StaticAnalysisSe
 logger = get_logger(__name__)
 
 
+class ReviewPipelineError(Exception):
+    """
+    Raised when the AI review pipeline cannot produce a reliable verdict.
+
+    This happens when too many review passes fail (e.g., AI returns empty
+    responses, JSON parse errors, or timeouts). The pipeline treats this as
+    a job-level failure so the worker can retry the entire review job.
+
+    This is intentionally distinct from individual pass failures:
+    - Individual pass failure → data={'error': ...}, pipeline continues
+    - Pipeline failure → ReviewPipelineError raised, worker retries the job
+    """
+
+    def __init__(self, failed_passes: list[str], total_passes: int):
+        self.failed_passes = failed_passes
+        self.total_passes = total_passes
+        names = ', '.join(failed_passes)
+        super().__init__(
+            f'Review pipeline failed: {len(failed_passes)}/{total_passes} passes failed '
+            f'({names}). Cannot produce a reliable verdict. Worker will retry.'
+        )
+
+
 class ReviewCategory(str, Enum):
     """Review comment categories."""
     BUG = 'bug'
@@ -104,6 +127,8 @@ class ReviewResult:
     ranking_report: RankingReport | None = None
     static_findings_count: int = 0
     incremental_files_skipped: int = 0
+    # Number of AI passes that failed (0 = clean, 1-2 = partial)
+    pipeline_failures: int = 0
 
 
 @dataclass
@@ -280,6 +305,14 @@ class AIReviewService:
         passes.extend([risks, quality, business])
         total_tokens += risks.tokens_used + quality.tokens_used + business.tokens_used
 
+        # ── Step 5b: Early pipeline integrity check ───────────────────────
+        # If ALL 3 analysis passes failed (AI returned empty/unparseable
+        # responses), skip the expensive comments pass and raise immediately.
+        # The worker will retry the entire review job with backoff.
+        early_failed = [p.name for p in [risks, quality, business] if 'error' in p.data]
+        if len(early_failed) == 3:
+            raise ReviewPipelineError(failed_passes=early_failed, total_passes=4)
+
         # Pass 5: Generate Comments (depends on all previous passes)
         comments_pass = await self._run_pass(
             'comments',
@@ -293,6 +326,17 @@ class AIReviewService:
         )
         passes.append(comments_pass)
         total_tokens += comments_pass.tokens_used
+
+        # ── Step 5c: Final pipeline integrity check ───────────────────────
+        # If 3 or more of the 4 critical passes failed, the review data is
+        # too incomplete to trust. Raise to trigger worker retry.
+        all_critical = [risks, quality, business, comments_pass]
+        all_failed = [p.name for p in all_critical if 'error' in p.data]
+        if len(all_failed) >= 3:
+            raise ReviewPipelineError(failed_passes=all_failed, total_passes=4)
+
+        # Track partial failures (1-2 passes failed) for conservative verdicts
+        partial_failures = len(all_failed)
 
         # ── Step 6: Parse raw comments ────────────────────────────────────
         raw_comments = self._parse_comments(comments_pass.data)
@@ -321,14 +365,23 @@ class AIReviewService:
 
         # ── Step 11: Summary and verdict ──────────────────────────────────
         summary = self._generate_summary(understanding.data, risks.data)
-        verdict = self._determine_verdict(risks.data, final_comments)
+        verdict = self._determine_verdict(
+            risks.data, final_comments, partial_failures=partial_failures
+        )
 
         duration_ms = int((time.time() - start_time) * 1000)
+
+        if partial_failures > 0:
+            logger.warning(
+                f'AI review completed with {partial_failures}/4 pass failures. '
+                f'Verdict is conservative (needs_discussion or changes_requested).'
+            )
 
         logger.info(
             f'AI review complete: raw={len(raw_comments)}, '
             f'evidence_passed={len(evidence_filtered)}, '
             f'ranked_kept={len(final_comments)}, '
+            f'pass_failures={partial_failures}, '
             f'{total_tokens} tokens, {duration_ms}ms'
         )
 
@@ -343,6 +396,7 @@ class AIReviewService:
             ranking_report=ranking_report,
             static_findings_count=static_findings_count,
             incremental_files_skipped=incremental_skipped,
+            pipeline_failures=partial_failures,
         )
 
     async def _apply_incremental_filter(
@@ -412,15 +466,22 @@ class AIReviewService:
         pass_name: str,
         prompt: str,
     ) -> ReviewPass:
-        """Run a single review pass."""
+        """
+        Run a single review pass against the AI model.
+
+        Looks up per-pass max_tokens from settings so each pass can be
+        independently tuned. Falls back to the global AI_MAX_TOKENS if not set.
+        """
         start_time = time.time()
 
         system_prompt = self.SYSTEM_PROMPTS.get(pass_name, '')
+        max_tokens = settings.get_pass_max_tokens(pass_name)
 
         try:
             response = await self.ai_client.complete_json(
                 prompt=prompt,
                 system_prompt=system_prompt,
+                max_tokens=max_tokens,
             )
 
             duration_ms = int((time.time() - start_time) * 1000)
@@ -795,10 +856,39 @@ Focus on the most impactful issues. Be constructive and helpful.'''
         self,
         risks: dict[str, Any],
         comments: list[GeneratedComment],
+        partial_failures: int = 0,
     ) -> str:
-        """Determine review verdict."""
-        risk_level = risks.get('risk_level', 'low')
+        """
+        Determine review verdict.
 
+        Args:
+            risks: Parsed data from the risks pass.
+            comments: Final ranked comments.
+            partial_failures: Number of analysis passes that returned error data.
+                When > 0, the verdict is downgraded to be conservative —
+                we never default to 'approved' when data is incomplete.
+        """
+        risk_level = risks.get('risk_level', 'unknown')
+
+        # When risk data is missing (pass failed), we cannot safely approve.
+        # Use 'needs_discussion' as the conservative default instead of 'approved'.
+        if risk_level == 'unknown' or partial_failures > 0:
+            # If there are critical/security comments despite partial failure,
+            # still escalate to changes_requested.
+            critical_count = sum(
+                1 for c in comments
+                if c.severity in ('critical', 'error')
+            )
+            security_count = sum(
+                1 for c in comments
+                if c.category == 'security'
+            )
+            if critical_count > 0 or security_count > 0:
+                return ReviewVerdict.CHANGES_REQUESTED.value
+            # Cannot determine risk level — ask for human review.
+            return ReviewVerdict.NEEDS_DISCUSSION.value
+
+        # Normal verdict logic when all passes succeeded.
         # Count critical/error comments
         critical_count = sum(
             1 for c in comments
@@ -846,6 +936,7 @@ Focus on the most impactful issues. Be constructive and helpful.'''
             ai_model=self.ai_client.model,
             ai_tokens_used=result.total_tokens,
             processing_time_ms=result.duration_ms,
+            pipeline_failures=result.pipeline_failures,
             ai_passes={
                 f'pass_{i+1}_{p.name}': p.data
                 for i, p in enumerate(result.passes)
