@@ -4,6 +4,7 @@ All settings are loaded from environment variables.
 """
 
 from functools import lru_cache
+from pydantic import Field, AliasChoices
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -23,14 +24,14 @@ class Settings(BaseSettings):
     log_level: str = 'INFO'
 
     # Frontend URL (for OAuth redirects)
-    frontend_url: str = 'http://localhost:3000'
+    frontend_url: str
 
     # PostgreSQL
-    postgres_host: str = 'localhost'
+    postgres_host: str
     postgres_port: int = 5432
-    postgres_db: str = 'codelingerk_dev'
-    postgres_user: str = 'dev'
-    postgres_password: str = 'devpass'
+    postgres_db: str
+    postgres_user: str
+    postgres_password: str
 
     @property
     def database_url(self) -> str:
@@ -119,9 +120,12 @@ class Settings(BaseSettings):
         return ''
 
     # JWT
-    jwt_secret_key: str = 'change-me-in-production'
+    jwt_secret_key: str = Field(validation_alias=AliasChoices('jwt_secret_key', 'jwt_secret'))
     jwt_algorithm: str = 'HS256'
-    jwt_access_token_expire_minutes: int = 30
+    jwt_access_token_expire_minutes: int = Field(
+        default=30,
+        validation_alias=AliasChoices('jwt_access_token_expire_minutes', 'jwt_expire_minutes')
+    )
     jwt_refresh_token_expire_days: int = 7
 
     # Repository storage
@@ -134,11 +138,43 @@ class Settings(BaseSettings):
     ai_api_key: str = ''  # Unified API key for any provider
     ai_base_url: str = ''  # Base URL for OpenAI-compatible providers (e.g., https://api.deepseek.com)
     ai_model: str = 'gpt-4o'  # Model name varies by provider
-    ai_max_tokens: int = 4096
+    ai_max_tokens: int = 8192  # Default max output tokens (used if per-pass value not set)
     ai_temperature: float = 0.3
     ai_timeout: int = 120
     ai_max_retries: int = 3
     ai_retry_delay: float = 1.0
+
+    # Per-pass max output tokens (overrides ai_max_tokens for each specific pass).
+    # Tune these if a pass produces truncated (finish_reason='length') responses.
+    # - understanding: produces a small JSON summary (~500 tokens output)
+    # - risks/quality/business: produce structured JSON arrays (~2000 tokens output)
+    # - comments: produces the largest JSON array with full comment bodies (~4000 tokens)
+    # Set to 0 to fall back to ai_max_tokens.
+    ai_max_tokens_understanding: int = 0
+    ai_max_tokens_risks: int = 0
+    ai_max_tokens_quality: int = 0
+    ai_max_tokens_business: int = 0
+    ai_max_tokens_comments: int = 0
+
+    def get_pass_max_tokens(self, pass_name: str) -> int:
+        """
+        Get the effective max output tokens for a specific review pass.
+
+        Returns the per-pass override if configured (non-zero), otherwise
+        falls back to the global ai_max_tokens value.
+
+        Args:
+            pass_name: One of 'understanding', 'risks', 'quality', 'business', 'comments'
+        """
+        per_pass_map = {
+            'understanding': self.ai_max_tokens_understanding,
+            'risks': self.ai_max_tokens_risks,
+            'quality': self.ai_max_tokens_quality,
+            'business': self.ai_max_tokens_business,
+            'comments': self.ai_max_tokens_comments,
+        }
+        override = per_pass_map.get(pass_name, 0)
+        return override if override > 0 else self.ai_max_tokens
 
     # Legacy keys (deprecated - use ai_api_key instead)
     anthropic_api_key: str = ''

@@ -88,6 +88,13 @@ class Review(Base):
     ai_tokens_used: Mapped[int | None] = mapped_column(Integer, nullable=True)
     processing_time_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
+    # Number of AI passes that failed (returned error data instead of analysis).
+    # 0 = all passes succeeded (clean review).
+    # 1-2 = partial failure; verdict may be conservative.
+    # 3+ = pipeline failed; worker retried. This value should not reach DB
+    #       unless the job succeeded on a subsequent retry with partial failures.
+    pipeline_failures: Mapped[int] = mapped_column(Integer, default=0)
+
     github_review_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
     # Snapshot relationship (new field for pipeline)

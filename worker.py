@@ -261,12 +261,20 @@ class Worker:
         Run AI review on snapshot.
 
         Uses AIReviewService to run 5-pass AI review pipeline.
+
+        If the pipeline fails (too many AI passes return empty/unparseable
+        responses), ReviewPipelineError is raised. This propagates out to
+        the worker's _poll_queue error handler, which calls queue_service.fail(),
+        triggering an automatic retry with exponential backoff.
+
+        The PUBLISH step is NOT enqueued on pipeline failure — no misleading
+        review will be posted to GitHub or shown on the UI.
         """
         from sqlalchemy import select
         from sqlalchemy.orm import selectinload
         from apps.ai_reviewer.services.context_service import ContextService
         from apps.ai_reviewer.services.layer_service import LayerService
-        from apps.ai_reviewer.services.ai_review_service import AIReviewService
+        from apps.ai_reviewer.services.ai_review_service import AIReviewService, ReviewPipelineError
 
         # Get snapshot with pull_request loaded
         result = await db.execute(
@@ -293,7 +301,18 @@ class Worker:
 
         # Run AI review
         ai_service = AIReviewService(db)
-        review_result = await ai_service.review_snapshot(snapshot, context, layers)
+        try:
+            review_result = await ai_service.review_snapshot(snapshot, context, layers)
+        except ReviewPipelineError as e:
+            # The AI pipeline could not produce a reliable verdict.
+            # Re-raise so _poll_queue catches it and calls queue_service.fail(),
+            # which will retry the job up to max_attempts with exponential backoff.
+            # PUBLISH is intentionally NOT enqueued — no review will be posted.
+            logger.error(
+                f'Review pipeline failed for snapshot {snapshot_id[:8]}: {e}. '
+                f'Job will be retried.'
+            )
+            raise
 
         # Save review to database
         review = await ai_service.save_review(snapshot, review_result)
@@ -310,6 +329,7 @@ class Worker:
             'verdict': review_result.verdict,
             'tokens_used': review_result.total_tokens,
         }
+
 
     async def _process_publish(self, db: Any, snapshot_id: str) -> dict:
         """
