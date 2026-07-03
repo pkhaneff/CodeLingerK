@@ -249,6 +249,7 @@ class GraphService:
             )
             stats['imports'] += 1
 
+        stats['file_id'] = file.id
         logger.debug(f'Indexed {parsed.file_path}: {stats}')
         return stats
 

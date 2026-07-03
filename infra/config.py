@@ -144,6 +144,20 @@ class Settings(BaseSettings):
     ai_max_retries: int = 3
     ai_retry_delay: float = 1.0
 
+    # Token Budget Configuration
+    ai_soft_budget: int = 40000  # Max context tokens for LLM call
+    ai_soft_budget_ratios: dict[str, float] = {
+        "changed_lines": 0.50,
+        "changed_functions": 0.25,
+        "dependencies": 0.15,
+        "system_prompt": 0.10
+    }
+
+    # Embedding Configuration (for pgvector)
+    ai_embedding_model: str = 'text-embedding-3-small'
+    ai_embedding_api_key: str = ''
+    ai_embedding_base_url: str = ''
+
     # Per-pass max output tokens (overrides ai_max_tokens for each specific pass).
     # Tune these if a pass produces truncated (finish_reason='length') responses.
     # - understanding: produces a small JSON summary (~500 tokens output)

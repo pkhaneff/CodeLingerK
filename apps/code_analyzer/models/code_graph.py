@@ -24,6 +24,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import UUID, ARRAY
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+from pgvector.sqlalchemy import Vector
 
 from infra.database import Base
 
@@ -78,6 +79,11 @@ class IndexedFile(Base):
         back_populates='file',
         cascade='all, delete-orphan',
     )
+    chunks: Mapped[list['FileChunk']] = relationship(
+        'FileChunk',
+        back_populates='file',
+        cascade='all, delete-orphan',
+    )
 
     __table_args__ = (
         UniqueConstraint('repository_id', 'path', name='uq_indexed_files_repo_path'),
@@ -127,6 +133,8 @@ class Symbol(Base):
     parent_class_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     content_hash: Mapped[str] = mapped_column(String(16), nullable=False)
     decorators: Mapped[list[str] | None] = mapped_column(ARRAY(String), nullable=True)
+    embedding: Mapped[list[float] | None] = mapped_column(Vector(1536), nullable=True)
+    is_embedded: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -326,3 +334,48 @@ class SymbolInheritance(Base):
 
     def __repr__(self) -> str:
         return f'<SymbolInheritance {self.child_class_id} extends {self.parent_class_name}>'
+
+
+class FileChunk(Base):
+    """
+    Represents a raw text chunk of a non-structural file for semantic search.
+
+    Fields:
+        id: UUID primary key
+        file_id: Foreign key to IndexedFile
+        chunk_index: Order index of the chunk in the file
+        content: Text content of the chunk
+        embedding: Vector embedding of the chunk
+    """
+
+    __tablename__ = 'file_chunks'
+
+    id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False),
+        primary_key=True,
+        default=lambda: str(uuid4()),
+    )
+    file_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=False),
+        ForeignKey('indexed_files.id', ondelete='CASCADE'),
+        nullable=False,
+    )
+    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    embedding: Mapped[list[float] | None] = mapped_column(Vector(1536), nullable=True)
+    is_embedded: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=datetime.utcnow,
+    )
+
+    # Relationships
+    file: Mapped['IndexedFile'] = relationship('IndexedFile', back_populates='chunks')
+
+    __table_args__ = (
+        Index('idx_file_chunks_file_id', 'file_id'),
+    )
+
+    def __repr__(self) -> str:
+        return f'<FileChunk {self.file_id}:{self.chunk_index}>'

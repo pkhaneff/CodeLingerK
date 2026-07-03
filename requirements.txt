@@ -39,3 +39,7 @@ pytest-asyncio>=0.23.0
 # Future dependencies (commented out for now)
 # anthropic>=0.18.0            # AI code review
 # semgrep>=1.45.0              # Static analysis
+
+# Token budgeting
+tiktoken>=0.5.0
+pgvector>=0.2.0
