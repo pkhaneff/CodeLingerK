@@ -43,13 +43,125 @@ from apps.ai_reviewer.prompts import (
     get_business_prompt,
     get_comments_prompt,
 )
-from apps.ai_reviewer.services.context_service import ContextService, SnapshotContext
+from apps.ai_reviewer.services.context_service import ContextService, SnapshotContext, FileContext
 from apps.ai_reviewer.services.evidence_service import EvidenceService, EvidenceReport
 from apps.ai_reviewer.services.ranking_service import RankingService, RankingReport
 from apps.ai_reviewer.services.memory_service import MemoryService
 from apps.code_analyzer.services.static_analysis_service import StaticAnalysisService, StaticAnalysisResult
 
 logger = get_logger(__name__)
+
+
+class ChunkPlanner:
+    """Plans how to split a large review context into smaller review chunks."""
+
+    def __init__(self, soft_budget: int):
+        self.soft_budget = soft_budget
+
+    def plan_chunks(self, context: SnapshotContext) -> list[SnapshotContext]:
+        """
+        Split a SnapshotContext into multiple SnapshotContext chunks
+        such that each chunk's estimated tokens fits within the soft budget.
+        """
+        if context.estimated_tokens <= self.soft_budget:
+            return [context]
+
+        logger.info(f'PR size ({context.estimated_tokens} tokens) exceeds budget ({self.soft_budget}). Splitting into chunks.')
+
+        chunks: list[SnapshotContext] = []
+        current_files: list[FileContext] = []
+        current_additions = 0
+        current_deletions = 0
+
+        from apps.ai_reviewer.services.context_service import ContextService
+        ctx_svc = ContextService(None)
+
+        for f in context.files:
+            test_ctx = SnapshotContext(
+                snapshot_id=context.snapshot_id,
+                commit_sha=context.commit_sha,
+                files=current_files + [f],
+                total_additions=current_additions + f.additions,
+                total_deletions=current_deletions + f.deletions,
+            )
+            # Map Level 2 functions for testing size
+            test_ctx.level2_functions = {}
+            if getattr(context, 'level2_functions', None):
+                for fp in [x.file_path for x in test_ctx.files]:
+                    if fp in context.level2_functions:
+                        test_ctx.level2_functions[fp] = context.level2_functions[fp]
+
+            test_str = ctx_svc.build_review_prompt_context(test_ctx, include_full_diff=True)
+            test_tokens = len(test_str) // 4
+
+            if current_files and test_tokens > self.soft_budget:
+                chunk = SnapshotContext(
+                    snapshot_id=context.snapshot_id,
+                    commit_sha=context.commit_sha,
+                    files=current_files,
+                    total_additions=current_additions,
+                    total_deletions=current_deletions,
+                )
+                chunks.append(chunk)
+                current_files = [f]
+                current_additions = f.additions
+                current_deletions = f.deletions
+            else:
+                current_files.append(f)
+                current_additions += f.additions
+                current_deletions += f.deletions
+
+        if current_files:
+            chunk = SnapshotContext(
+                snapshot_id=context.snapshot_id,
+                commit_sha=context.commit_sha,
+                files=current_files,
+                total_additions=current_additions,
+                total_deletions=current_deletions,
+            )
+            chunks.append(chunk)
+
+        # Populate other metadata fields for all chunks
+        for chunk in chunks:
+            chunk.level3_dependencies = context.level3_dependencies
+            chunk.level4_semantic_search = context.level4_semantic_search
+            if getattr(context, 'level2_functions', None):
+                chunk.level2_functions = {
+                    fp: context.level2_functions[fp]
+                    for fp in [x.file_path for x in chunk.files]
+                    if fp in context.level2_functions
+                }
+            final_str = ctx_svc.build_review_prompt_context(chunk)
+            try:
+                import tiktoken
+                encoding = tiktoken.get_encoding('cl100k_base')
+                chunk.estimated_tokens = len(encoding.encode(final_str))
+            except Exception:
+                chunk.estimated_tokens = len(final_str) // 4
+
+        logger.info(f'Planned {len(chunks)} chunks for review.')
+        return chunks
+
+
+class Synthesizer:
+    """Merges and de-duplicates review comments from multiple chunks."""
+
+    def merge_comments(self, all_comments: list[Any]) -> list[Any]:
+        """Merge comments, de-duplicating by file_path, line_start, and normalized body suggestion."""
+        seen = set()
+        unique_comments = []
+
+        for comment in all_comments:
+            normalized_body = ''.join(comment.explanation.split()).lower()
+            key = (comment.file_path, comment.line_start, normalized_body)
+
+            if key not in seen:
+                seen.add(key)
+                unique_comments.append(comment)
+            else:
+                logger.info(f'Synthesizer: de-duplicated comment on {comment.file_path}:{comment.line_start}')
+
+        return unique_comments
 
 
 class ReviewPipelineError(Exception):
@@ -270,134 +382,273 @@ class AIReviewService:
         else:
             logger.debug('No repo_dir set — skipping static analysis')
 
-        # ── Step 4: Build context string ──────────────────────────────────
-        context_str = self._build_context_string(
-            context, layers, external,
-            rules_section=rules_prompt_section,
-            static_section=static_section,
-        )
+        # Get soft budget from settings
+        soft_budget = getattr(settings, 'ai_soft_budget', 50000)
 
-        # ── Step 5: 5-Pass LLM Review ────────────────────────────────────
-        # Pass 1: Understanding (must run first)
-        understanding = await self._run_pass(
-            'understanding',
-            self._build_understanding_prompt(context_str),
-        )
-        passes.append(understanding)
-        total_tokens += understanding.tokens_used
+        # Plan chunks
+        planner = ChunkPlanner(soft_budget)
+        chunks = planner.plan_chunks(context)
 
-        # Pass 2, 3, 4: Run in PARALLEL (all depend only on pass 1)
-        # This reduces latency by ~2-3x for the analysis phase
-        risks, quality, business = await asyncio.gather(
-            self._run_pass(
-                'risks',
-                self._build_risks_prompt(context_str, understanding.data),
-            ),
-            self._run_pass(
-                'quality',
-                self._build_quality_prompt(context_str, understanding.data),
-            ),
-            self._run_pass(
-                'business',
-                self._build_business_prompt(context_str, understanding.data),
-            ),
-        )
-        passes.extend([risks, quality, business])
-        total_tokens += risks.tokens_used + quality.tokens_used + business.tokens_used
-
-        # ── Step 5b: Early pipeline integrity check ───────────────────────
-        # If ALL 3 analysis passes failed (AI returned empty/unparseable
-        # responses), skip the expensive comments pass and raise immediately.
-        # The worker will retry the entire review job with backoff.
-        early_failed = [p.name for p in [risks, quality, business] if 'error' in p.data]
-        if len(early_failed) == 3:
-            raise ReviewPipelineError(failed_passes=early_failed, total_passes=4)
-
-        # Pass 5: Generate Comments (depends on all previous passes)
-        comments_pass = await self._run_pass(
-            'comments',
-            self._build_comments_prompt(
-                context_str,
-                understanding.data,
-                risks.data,
-                quality.data,
-                business.data,
-            ),
-        )
-        passes.append(comments_pass)
-        total_tokens += comments_pass.tokens_used
-
-        # ── Step 5c: Final pipeline integrity check ───────────────────────
-        # If 3 or more of the 4 critical passes failed, the review data is
-        # too incomplete to trust. Raise to trigger worker retry.
-        all_critical = [risks, quality, business, comments_pass]
-        all_failed = [p.name for p in all_critical if 'error' in p.data]
-        if len(all_failed) >= 3:
-            raise ReviewPipelineError(failed_passes=all_failed, total_passes=4)
-
-        # Track partial failures (1-2 passes failed) for conservative verdicts
-        partial_failures = len(all_failed)
-
-        # ── Step 6: Parse raw comments ────────────────────────────────────
-        raw_comments = self._parse_comments(comments_pass.data)
-
-        # ── Step 7: Evidence Gate (NO EVIDENCE = NO COMMENT) ─────────────
-        evidence_svc = EvidenceService(context)
-        evidence_filtered, evidence_report = evidence_svc.filter_comments(
-            raw_comments,
-            min_confidence=0.5,
-        )
-
-        # ── Step 8: Memory — Suppress accepted decisions ──────────────────
-        if memory:
-            evidence_filtered, suppressed = await memory.filter_accepted_decisions(
-                evidence_filtered
-            )
-            if suppressed:
-                logger.info(f'Memory suppressed {suppressed} accepted findings')
-
-        # ── Step 9: Finding Ranking (score < 0.6 dropped) ─────────────────
-        ranker = RankingService(layers=layers)
-        ranked_comments, ranking_report = ranker.rank(evidence_filtered)
-
-        # ── Step 10: Apply hard comment limits ────────────────────────────
-        final_comments = self._apply_comment_limits(ranked_comments)
-
-        # ── Step 11: Summary and verdict ──────────────────────────────────
-        summary = self._generate_summary(understanding.data, risks.data)
-        verdict = self._determine_verdict(
-            risks.data, final_comments, partial_failures=partial_failures
-        )
-
-        duration_ms = int((time.time() - start_time) * 1000)
-
-        if partial_failures > 0:
-            logger.warning(
-                f'AI review completed with {partial_failures}/4 pass failures. '
-                f'Verdict is conservative (needs_discussion or changes_requested).'
+        if len(chunks) == 1:
+            # ── Step 4: Build context string ──────────────────────────────────
+            context_str = self._build_context_string(
+                context, layers, external,
+                rules_section=rules_prompt_section,
+                static_section=static_section,
             )
 
-        logger.info(
-            f'AI review complete: raw={len(raw_comments)}, '
-            f'evidence_passed={len(evidence_filtered)}, '
-            f'ranked_kept={len(final_comments)}, '
-            f'pass_failures={partial_failures}, '
-            f'{total_tokens} tokens, {duration_ms}ms'
-        )
+            # ── Step 5: 5-Pass LLM Review ────────────────────────────────────
+            understanding = await self._run_pass(
+                'understanding',
+                self._build_understanding_prompt(context_str),
+            )
+            passes.append(understanding)
+            total_tokens += understanding.tokens_used
 
-        return ReviewResult(
-            passes=passes,
-            comments=final_comments,
-            summary=summary,
-            verdict=verdict,
-            total_tokens=total_tokens,
-            duration_ms=duration_ms,
-            evidence_report=evidence_report,
-            ranking_report=ranking_report,
-            static_findings_count=static_findings_count,
-            incremental_files_skipped=incremental_skipped,
-            pipeline_failures=partial_failures,
-        )
+            risks, quality, business = await asyncio.gather(
+                self._run_pass(
+                    'risks',
+                    self._build_risks_prompt(context_str, understanding.data),
+                ),
+                self._run_pass(
+                    'quality',
+                    self._build_quality_prompt(context_str, understanding.data),
+                ),
+                self._run_pass(
+                    'business',
+                    self._build_business_prompt(context_str, understanding.data),
+                ),
+            )
+            passes.extend([risks, quality, business])
+            total_tokens += risks.tokens_used + quality.tokens_used + business.tokens_used
+
+            early_failed = [p.name for p in [risks, quality, business] if 'error' in p.data]
+            if len(early_failed) == 3:
+                raise ReviewPipelineError(failed_passes=early_failed, total_passes=4)
+
+            comments_pass = await self._run_pass(
+                'comments',
+                self._build_comments_prompt(
+                    context_str,
+                    understanding.data,
+                    risks.data,
+                    quality.data,
+                    business.data,
+                ),
+            )
+            passes.append(comments_pass)
+            total_tokens += comments_pass.tokens_used
+
+            all_critical = [risks, quality, business, comments_pass]
+            all_failed = [p.name for p in all_critical if 'error' in p.data]
+            if len(all_failed) >= 3:
+                raise ReviewPipelineError(failed_passes=all_failed, total_passes=4)
+
+            partial_failures = len(all_failed)
+
+            # ── Step 6: Parse raw comments ────────────────────────────────────
+            raw_comments = self._parse_comments(comments_pass.data)
+
+            # ── Step 7: Evidence Gate ─────────────────────────────────────────
+            evidence_svc = EvidenceService(context)
+            evidence_filtered, evidence_report = evidence_svc.filter_comments(
+                raw_comments,
+                min_confidence=0.5,
+            )
+
+            # ── Step 8: Memory suppress ───────────────────────────────────────
+            if memory:
+                evidence_filtered, suppressed = await memory.filter_accepted_decisions(
+                    evidence_filtered
+                )
+                if suppressed:
+                    logger.info(f'Memory suppressed {suppressed} accepted findings')
+
+            # ── Step 9: Finding Ranking ───────────────────────────────────────
+            ranker = RankingService(layers=layers)
+            ranked_comments, ranking_report = ranker.rank(evidence_filtered)
+
+            # ── Step 10: Apply hard comment limits ────────────────────────────
+            final_comments = self._apply_comment_limits(ranked_comments)
+
+            # ── Step 11: Summary and verdict ──────────────────────────────────
+            summary = self._generate_summary(understanding.data, risks.data)
+            verdict = self._determine_verdict(
+                risks.data, final_comments, partial_failures=partial_failures
+            )
+
+            duration_ms = int((time.time() - start_time) * 1000)
+
+            if partial_failures > 0:
+                logger.warning(
+                    f'AI review completed with {partial_failures}/4 pass failures. '
+                    f'Verdict is conservative (needs_discussion or changes_requested).'
+                )
+
+            logger.info(
+                f'AI review complete: raw={len(raw_comments)}, '
+                f'evidence_passed={len(evidence_filtered)}, '
+                f'ranked_kept={len(final_comments)}, '
+                f'pass_failures={partial_failures}, '
+                f'{total_tokens} tokens, {duration_ms}ms'
+            )
+
+            return ReviewResult(
+                passes=passes,
+                comments=final_comments,
+                summary=summary,
+                verdict=verdict,
+                total_tokens=total_tokens,
+                duration_ms=duration_ms,
+                evidence_report=evidence_report,
+                ranking_report=ranking_report,
+                static_findings_count=static_findings_count,
+                incremental_files_skipped=incremental_skipped,
+                pipeline_failures=partial_failures,
+            )
+
+        else:
+            # CHUNKED PATHWAY (for very large PRs to prevent token truncation)
+            logger.info(f'Executing chunked review pathway across {len(chunks)} chunks.')
+
+            all_raw_comments = []
+            all_evidence_filtered = []
+            passes = []
+            total_tokens = 0
+            partial_failures = 0
+            chunk_summaries = []
+            chunk_risks = []
+
+            for idx, chunk in enumerate(chunks):
+                logger.info(f'Reviewing chunk {idx + 1}/{len(chunks)} ({chunk.file_count} files, ~{chunk.estimated_tokens} tokens)')
+
+                # Filter static findings for this chunk
+                chunk_files = {f.file_path for f in chunk.files}
+                if self.repo_dir:
+                    chunk_findings = [f for f in static_result.findings if f.file_path in chunk_files]
+                    chunk_static_res = StaticAnalysisResult(findings=chunk_findings)
+                    chunk_static_section = chunk_static_res.to_prompt_section()
+                else:
+                    chunk_static_section = ''
+
+                # ── Step 4: Build context string for chunk ────────────────────
+                chunk_context_str = self._build_context_string(
+                    chunk, layers, external,
+                    rules_section=rules_prompt_section,
+                    static_section=chunk_static_section,
+                )
+
+                # ── Step 5: 5-Pass LLM Review for chunk ────────────────────────
+                understanding = await self._run_pass(
+                    'understanding',
+                    self._build_understanding_prompt(chunk_context_str),
+                )
+                passes.append(understanding)
+                total_tokens += understanding.tokens_used
+                if 'error' not in understanding.data:
+                    chunk_summaries.append(understanding.data.get('summary', ''))
+
+                risks, quality, business = await asyncio.gather(
+                    self._run_pass(
+                        'risks',
+                        self._build_risks_prompt(chunk_context_str, understanding.data),
+                    ),
+                    self._run_pass(
+                        'quality',
+                        self._build_quality_prompt(chunk_context_str, understanding.data),
+                    ),
+                    self._run_pass(
+                        'business',
+                        self._build_business_prompt(chunk_context_str, understanding.data),
+                    ),
+                )
+                passes.extend([risks, quality, business])
+                total_tokens += risks.tokens_used + quality.tokens_used + business.tokens_used
+                if 'error' not in risks.data:
+                    chunk_risks.append(risks.data.get('risk_level', 'low'))
+
+                chunk_failed = [p.name for p in [risks, quality, business] if 'error' in p.data]
+                if len(chunk_failed) == 3:
+                    logger.warning(f'Chunk {idx + 1} analysis passes failed completely. Continuing.')
+                    continue
+
+                comments_pass = await self._run_pass(
+                    'comments',
+                    self._build_comments_prompt(
+                        chunk_context_str,
+                        understanding.data,
+                        risks.data,
+                        quality.data,
+                        business.data,
+                    ),
+                )
+                passes.append(comments_pass)
+                total_tokens += comments_pass.tokens_used
+
+                chunk_critical = [risks, quality, business, comments_pass]
+                chunk_all_failed = [p.name for p in chunk_critical if 'error' in p.data]
+                partial_failures += len(chunk_all_failed)
+
+                chunk_raw_comments = self._parse_comments(comments_pass.data)
+                all_raw_comments.extend(chunk_raw_comments)
+
+                # Evidence Gate
+                evidence_svc = EvidenceService(chunk)
+                chunk_evidence_filtered, _ = evidence_svc.filter_comments(
+                    chunk_raw_comments,
+                    min_confidence=0.5,
+                )
+
+                # Memory suppress
+                if memory:
+                    chunk_evidence_filtered, _ = await memory.filter_accepted_decisions(
+                        chunk_evidence_filtered
+                    )
+                all_evidence_filtered.extend(chunk_evidence_filtered)
+
+            # ── Step 6: Merge & Synthesize ────────────────────────────────────
+            synthesizer = Synthesizer()
+            synthesized_comments = synthesizer.merge_comments(all_evidence_filtered)
+
+            # ── Step 9: Finding Ranking ───────────────────────────────────────
+            ranker = RankingService(layers=layers)
+            ranked_comments, ranking_report = ranker.rank(synthesized_comments)
+
+            # ── Step 10: Apply hard comment limits ────────────────────────────
+            final_comments = self._apply_comment_limits(ranked_comments)
+
+            # ── Step 11: Summary and verdict ──────────────────────────────────
+            summary = '### Chunked AI Review Summary\n\n'
+            summary += '\n\n'.join([f'**Chunk {i+1}**: {s}' for i, s in enumerate(chunk_summaries)])
+
+            verdict = 'approved'
+            if any(r == 'high' for r in chunk_risks):
+                verdict = 'changes_requested'
+            elif any(r == 'medium' for r in chunk_risks) or len(final_comments) > 0:
+                verdict = 'needs_discussion'
+
+            duration_ms = int((time.time() - start_time) * 1000)
+
+            logger.info(
+                f'Chunked AI review complete: chunks={len(chunks)}, raw={len(all_raw_comments)}, '
+                f'evidence_passed={len(all_evidence_filtered)}, '
+                f'synthesized_kept={len(final_comments)}, '
+                f'{total_tokens} tokens, {duration_ms}ms'
+            )
+
+            return ReviewResult(
+                passes=passes,
+                comments=final_comments,
+                summary=summary,
+                verdict=verdict,
+                total_tokens=total_tokens,
+                duration_ms=duration_ms,
+                evidence_report=None,
+                ranking_report=ranking_report,
+                static_findings_count=static_findings_count,
+                incremental_files_skipped=incremental_skipped,
+                pipeline_failures=partial_failures,
+            )
 
     async def _apply_incremental_filter(
         self,
@@ -435,29 +686,56 @@ class AIReviewService:
         if not previous_reviews:
             return context, 0
 
-        # Collect all file paths that were reviewed in previous snapshots
-        already_reviewed_files: set[str] = set()
-        for review in previous_reviews:
-            if review.review_order:
-                already_reviewed_files.update(review.review_order)
+        # Collect all file paths and their hashes from previous reviews
+        # Merging from oldest to newest so the newest hash version overrides
+        previous_file_hashes = {}
+        for r in reversed(previous_reviews):
+            if r.detailed_feedback and 'file_hashes' in r.detailed_feedback:
+                previous_file_hashes.update(r.detailed_feedback['file_hashes'])
+            elif r.review_order:
+                # Fallback for legacy reviews without file_hashes:
+                # Mark as legacy so we skip only if not in files_changed
+                for p in r.review_order:
+                    previous_file_hashes[p] = 'legacy'
 
-        # Build the set of current snapshot files
-        current_files = {f.file_path for f in context.files}
+        # Fetch current content hashes of all files in this repository from database
+        from apps.code_analyzer.models.code_graph import IndexedFile
+        stmt = select(IndexedFile.path, IndexedFile.content_hash).where(
+            IndexedFile.repository_id == snapshot.pull_request.repository_id
+        )
+        hash_rows = (await self.db.execute(stmt)).all()
+        current_file_hashes = {path: content_hash for path, content_hash in hash_rows}
 
-        # Files in the current snapshot that weren't touched in previous snapshots
-        # OR that appear in the snapshot's own files_changed (new/modified in this push)
-        new_or_changed = set(snapshot.files_changed or [])
-        skip_files = already_reviewed_files - new_or_changed
-        files_to_review = current_files - skip_files
+        files_to_review = []
+        skipped_count = 0
 
-        skipped_count = len(current_files) - len(files_to_review)
+        for f in context.files:
+            path = f.file_path
+            current_hash = current_file_hashes.get(path)
+            prev_hash = previous_file_hashes.get(path)
+
+            if prev_hash is not None:
+                # File was reviewed previously
+                if prev_hash == 'legacy':
+                    # Legacy fallback: skip if not in files_changed
+                    if path not in (snapshot.files_changed or []):
+                        skipped_count += 1
+                        continue
+                elif current_hash is not None and prev_hash == current_hash:
+                    # Hash Cache Hit: The file content has not changed since it was reviewed
+                    logger.info(f"Hash Cache Hit: skipping unchanged file {path} (hash: {current_hash})")
+                    skipped_count += 1
+                    continue
+
+            # Need to review this file
+            files_to_review.append(f)
 
         if skipped_count > 0:
             logger.info(
-                f'Incremental review: skipping {skipped_count} already-reviewed files '
-                f'(reviewing {len(files_to_review)}/{len(current_files)})'
+                f'Incremental review: skipping {skipped_count} unchanged/already-reviewed files '
+                f'(reviewing {len(files_to_review)}/{len(context.files) + skipped_count})'
             )
-            context.files = [f for f in context.files if f.file_path in files_to_review]
+            context.files = files_to_review
 
         return context, skipped_count
 
@@ -617,6 +895,37 @@ class AIReviewService:
                 for added in hunk.get('added_lines', [])[:20]:
                     parts.append(f'+{added.get("content", "")}')
                 parts.append('```')
+
+        # Level 2 Context (Surrounding functions)
+        level2 = getattr(context, 'level2_functions', None)
+        if level2:
+            parts.append('## Code Context (Surrounding Functions)')
+            for file_path, functions in level2.items():
+                if not functions:
+                    continue
+                parts.append(f'### Surrounding code in `{file_path}`:')
+                for fn in functions:
+                    parts.append(f'#### {fn["symbol_type"].upper()}: {fn["name"]} (lines {fn["lines"]}):')
+                    parts.append('```python')
+                    parts.append(fn['code'])
+                    parts.append('```')
+                parts.append('')
+
+        # Level 3 Context (Call Graph dependencies)
+        level3 = getattr(context, 'level3_dependencies', None)
+        if level3:
+            parts.append('## Semantic Call Relationships (Code Graph)')
+            for dep in level3:
+                parts.append(f'- {dep}')
+            parts.append('')
+
+        # Level 4 Context (Semantic search references)
+        level4 = getattr(context, 'level4_semantic_search', None)
+        if level4:
+            parts.append('## Relevant Code References (Semantic Search)')
+            for res in level4:
+                parts.append(res)
+            parts.append('')
 
         return '\n'.join(parts)
 
@@ -922,6 +1231,14 @@ Focus on the most impactful issues. Be constructive and helpful.'''
         Returns:
             Created Review record
         """
+        # Fetch current content hashes of indexed files to support Hash Cache
+        from apps.code_analyzer.models.code_graph import IndexedFile
+        stmt = select(IndexedFile.path, IndexedFile.content_hash).where(
+            IndexedFile.repository_id == snapshot.pull_request.repository_id
+        )
+        hash_rows = (await self.db.execute(stmt)).all()
+        file_hashes = {path: content_hash for path, content_hash in hash_rows}
+
         # Create Review record
         review = Review(
             repository_id=snapshot.pull_request.repository_id,
@@ -932,6 +1249,7 @@ Focus on the most impactful issues. Be constructive and helpful.'''
             status=ReviewStatus.COMPLETED.value,
             verdict=result.verdict,
             summary=result.summary,
+            detailed_feedback={'file_hashes': file_hashes},
             files_analyzed=len(set(c.file_path for c in result.comments)),
             ai_model=self.ai_client.model,
             ai_tokens_used=result.total_tokens,

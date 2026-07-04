@@ -245,8 +245,26 @@ class BaseAIClient:
         raise NotImplementedError
 
     def count_tokens(self, text: str) -> int:
-        """Estimate token count (rough: 4 chars per token)."""
-        return len(text) // 4
+        """
+        Count tokens in text.
+        
+        Attempts to use tiktoken matching the configured model name,
+        falling back to cl100k_base or character-based estimation on failure.
+        """
+        if not text:
+            return 0
+        try:
+            import tiktoken
+            model_name = self.config.model
+            try:
+                encoding = tiktoken.encoding_for_model(model_name)
+            except KeyError:
+                encoding = tiktoken.get_encoding("cl100k_base")
+            return len(encoding.encode(text))
+        except Exception:
+            # Fallback to character-based estimation (approx. 4 characters per token)
+            return len(text) // 4
+
 
 
 class ClaudeClient(BaseAIClient):

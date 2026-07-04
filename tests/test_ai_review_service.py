@@ -8,7 +8,7 @@ class _FakeAIClient:
         self._response = response
         self.model = 'fake-model'
 
-    async def complete_json(self, prompt: str, system_prompt: str):
+    async def complete_json(self, prompt: str, system_prompt: str, max_tokens: int | None = None):
         return self._response
 
     def count_tokens(self, text: str) -> int:

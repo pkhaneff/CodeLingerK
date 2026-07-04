@@ -332,6 +332,20 @@ class IndexService:
         # Index into graph (creates file, symbols, imports)
         stats = await self.graph.index_file(parsed)
 
+        # Create empty file chunks if file has no symbols (to be embedded by background worker)
+        file_id = stats.get('file_id')
+        if file_id and stats.get('symbols', 0) == 0:
+            from apps.code_analyzer.services.embedding_service import EmbeddingService
+            embed_svc = EmbeddingService(self.db)
+            try:
+                await embed_svc.create_empty_file_chunks(
+                    file_id=file_id,
+                    file_path=rel_path,
+                    repo_path=str(root)
+                )
+            except Exception as e:
+                logger.error(f'Failed to create empty chunks for {rel_path}: {e}')
+
         return parsed, stats
 
     async def get_index_stats(self) -> dict:
