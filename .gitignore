@@ -63,3 +63,6 @@ rule.md
 # Private keys (GitHub App, etc.)
 private/
 *.pem
+
+#markdown
+/markdown

@@ -48,3 +48,44 @@ def test_parse_comments_accepts_raw_list_wrapped_in_dict():
     assert comments[0].file_path == 'api/routes/reviews.py'
     assert comments[0].line_start == 10
 
+
+def test_parse_comments_accepts_single_comment_dict():
+    service = AIReviewService(db=None, ai_client=_FakeAIClient({}))
+    comment_dict = {
+        'file_path': 'src/controllers/discount_controller.py',
+        'line_start': 12,
+        'severity': 'critical',
+        'category': 'security',
+        'explanation': 'Issue',
+        'suggestion': 'Fix',
+        'confidence': 0.95,
+    }
+    comments = service._parse_comments(comment_dict)
+    assert len(comments) == 1
+    assert comments[0].file_path == 'src/controllers/discount_controller.py'
+    assert comments[0].line_start == 12
+    assert comments[0].severity == 'critical'
+
+
+def test_parse_comments_scans_nested_lists():
+    service = AIReviewService(db=None, ai_client=_FakeAIClient({}))
+    comments = service._parse_comments(
+        {
+            'some_random_key': [
+                {
+                    'file_path': 'src/utils/statistics_calculator.py',
+                    'line_start': 9,
+                    'severity': 'warning',
+                    'category': 'performance',
+                    'explanation': 'Issue',
+                    'suggestion': 'Fix',
+                    'confidence': 0.8,
+                }
+            ]
+        }
+    )
+    assert len(comments) == 1
+    assert comments[0].file_path == 'src/utils/statistics_calculator.py'
+    assert comments[0].line_start == 9
+
+

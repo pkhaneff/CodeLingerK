@@ -5,13 +5,15 @@ Authentication routes - Local credentials & Git provider OAuth linking flow.
 from datetime import datetime, timedelta
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Query, status
 from fastapi.responses import RedirectResponse
 from fastapi.security import HTTPAuthorizationCredentials
 from jose import jwt, JWTError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel, Field
+
+from core.exceptions import ValidationError, UnauthorizedException, ErrorCode
 
 from infra.database import get_db
 from infra.redis_client import redis_client
@@ -64,9 +66,9 @@ async def register(
     Creates a new user in the database with User role (authority='2').
     """
     if '@' not in request.email or '.' not in request.email:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid email format",
+        raise ValidationError(
+            error_code=ErrorCode.VALIDATION_FAILED,
+            message="Invalid email format",
         )
     
     try:
@@ -79,9 +81,9 @@ async def register(
         logger.info(f'New user registered: {user.username}')
         return success_response(user.to_dict(), message="User registered successfully")
     except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+        raise ValidationError(
+            error_code=ErrorCode.VALIDATION_FAILED,
+            message=str(e),
         )
 
 
@@ -99,9 +101,9 @@ async def login(
         password=request.password,
     )
     if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid username/email or password",
+        raise UnauthorizedException(
+            error_code=ErrorCode.INVALID_CREDENTIALS,
+            message="Invalid username/email or password",
         )
     
     # Generate Dual Tokens
@@ -139,23 +141,23 @@ async def refresh_token(
         # 2. Check token type
         token_type = payload.get('type')
         if token_type != 'refresh':
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid token type",
+            raise UnauthorizedException(
+                error_code=ErrorCode.INVALID_TOKEN_TYPE,
+                message="Invalid token type",
             )
             
         user_id = payload.get('sub')
         if not user_id:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid token payload",
+            raise UnauthorizedException(
+                error_code=ErrorCode.INVALID_TOKEN,
+                message="Invalid token payload",
             )
             
         # 3. Check blacklist
         if await auth_service.is_token_blacklisted(db, request.refresh_token):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Refresh token has been revoked",
+            raise UnauthorizedException(
+                error_code=ErrorCode.EXPIRED,
+                message="Refresh token has been revoked",
             )
             
         # 4. Fetch user
@@ -167,18 +169,18 @@ async def refresh_token(
         )
         user = result.scalar_one_or_none()
         if not user:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="User not found or inactive",
+            raise UnauthorizedException(
+                error_code=ErrorCode.USER_NOT_FOUND,
+                message="User not found or inactive",
             )
             
         # 5. Check last_logout validation
         iat = payload.get('iat')
         if user.last_logout and iat:
             if iat <= user.last_logout.timestamp():
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Refresh token was issued before the last logout",
+                raise UnauthorizedException(
+                    error_code=ErrorCode.EXPIRED,
+                    message="Refresh token was issued before the last logout",
                 )
                 
         # 6. Revoke the used Refresh Token (Token Rotation Blacklisting)

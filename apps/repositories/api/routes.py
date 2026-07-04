@@ -6,8 +6,9 @@ Provider-agnostic routes that work with any Git provider (GitHub, GitLab, etc.)
 
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
+from core.exceptions import ValidationError, NotFoundException, ErrorCode
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from apps.repositories.api.dependencies import create_provider_for_user, get_git_provider
@@ -133,7 +134,7 @@ async def add_repo(
         repo = await service.add_repo(request.provider_repo_id)
         return success_response(_repo_to_response(repo))
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise ValidationError(ErrorCode.VALIDATION_FAILED, message=str(e))
 
 
 # ─────────────────────────────────────────────────────────────
@@ -165,7 +166,7 @@ async def get_repo(
     """Get repository details."""
     repo = await service.get_repo(repo_id)
     if not repo:
-        raise HTTPException(status_code=404, detail='Repository not found')
+        raise NotFoundException(ErrorCode.NOT_FOUND, message='Repository not found')
 
     return success_response(_repo_to_response(repo))
 
@@ -185,7 +186,7 @@ async def remove_repo(
     service = RepositoryService(db, user)
     repo = await service.get_repo(repo_id)
     if not repo:
-        raise HTTPException(status_code=404, detail='Repository not found')
+        raise NotFoundException(ErrorCode.NOT_FOUND, message='Repository not found')
 
     provider_type = GitProviderType(repo.provider)
     git_provider = create_provider_for_user(user, provider_type)
@@ -195,7 +196,7 @@ async def remove_repo(
         await service.remove_repo(repo_id)
         return success_response(None, message='Repository removed')
     except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise NotFoundException(ErrorCode.NOT_FOUND, message=str(e))
 
 
 @router.post('/{repo_id}/clone')
