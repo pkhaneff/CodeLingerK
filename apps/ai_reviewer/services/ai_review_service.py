@@ -1075,8 +1075,16 @@ Focus on the most impactful issues. Be constructive and helpful.'''
                 and isinstance(data.get('raw', {}).get('comments'), list)
             ):
                 items = data.get('raw', {}).get('comments', [])
+            elif 'file_path' in data and ('explanation' in data or 'suggestion' in data):
+                # The dict itself represents a single comment
+                items = [data]
             else:
+                # Recursively search for any key containing a list of comment dicts
                 items = []
+                for val in data.values():
+                    if isinstance(val, list) and all(isinstance(x, dict) and 'file_path' in x for x in val):
+                        items = val
+                        break
         elif isinstance(data, list):
             items = data
         else:

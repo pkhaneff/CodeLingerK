@@ -38,7 +38,20 @@ async def main():
     logger.info("Starting Embedding Worker (one-off execution)...")
     total_symbols = 0
     total_chunks = 0
-    
+
+    # Get and log stats before starting
+    try:
+        async with get_db_context() as db:
+            embed_svc = EmbeddingService(db)
+            initial_stats = await embed_svc.get_vector_store_stats()
+            logger.info(
+                f"Initial Vector Store status: {initial_stats['embedded_symbols']} embedded symbols, "
+                f"{initial_stats['embedded_chunks']} embedded chunks "
+                f"(Total vectors in DB: {initial_stats['total_vectors']})"
+            )
+    except Exception as e:
+        logger.warning(f"Could not retrieve initial vector store status: {e}")
+
     while True:
         try:
             async with get_db_context() as db:
@@ -57,7 +70,21 @@ async def main():
             logger.error(f"Error in Embedding Worker execution: {e}", exc_info=True)
             sys.exit(1)
 
-    logger.info(f"Embedding process finished. Total embedded: {total_symbols} symbols, {total_chunks} chunks.")
+    # Get and log stats after finishing
+    try:
+        async with get_db_context() as db:
+            embed_svc = EmbeddingService(db)
+            final_stats = await embed_svc.get_vector_store_stats()
+            logger.info(
+                f"Embedding process finished. Total embedded in this run: {total_symbols} symbols, {total_chunks} chunks."
+            )
+            logger.info(
+                f"Final Vector Store status: {final_stats['embedded_symbols']} embedded symbols, "
+                f"{final_stats['embedded_chunks']} embedded chunks "
+                f"(Total vectors in DB: {final_stats['total_vectors']})"
+            )
+    except Exception as e:
+        logger.warning(f"Could not retrieve final vector store status: {e}")
 
 if __name__ == "__main__":
     try:

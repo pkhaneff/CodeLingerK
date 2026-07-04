@@ -322,6 +322,23 @@ class EmbeddingService:
         await self.db.flush()
         return created_count
 
+    async def get_vector_store_stats(self) -> dict[str, int]:
+        """Get counts of embedded symbols and file chunks in the vector store."""
+        from sqlalchemy import select, func
+        from apps.code_analyzer.models.code_graph import Symbol, FileChunk
+
+        symbol_stmt = select(func.count()).select_from(Symbol).where(Symbol.is_embedded == True)
+        chunk_stmt = select(func.count()).select_from(FileChunk).where(FileChunk.is_embedded == True)
+
+        symbol_count = (await self.db.execute(symbol_stmt)).scalar() or 0
+        chunk_count = (await self.db.execute(chunk_stmt)).scalar() or 0
+
+        return {
+            'embedded_symbols': symbol_count,
+            'embedded_chunks': chunk_count,
+            'total_vectors': symbol_count + chunk_count
+        }
+
     async def embed_pending_symbols_and_chunks(self, limit: int = 100) -> dict[str, int]:
         """
         Scan database for symbols and file chunks that have not been embedded yet,
@@ -351,6 +368,7 @@ class EmbeddingService:
             symbols_to_update = []
             content_cache = {}
 
+            logger.info(f"Found {len(symbol_rows)} pending symbols to embed.")
             for symbol, file_path, repo_id in symbol_rows:
                 cache_key = (repo_id, file_path)
                 if cache_key not in content_cache:
@@ -380,6 +398,7 @@ class EmbeddingService:
                     f'Docstring: {symbol.docstring or ""}\n'
                     f'Code Content:\n{symbol_code}'
                 )
+                logger.info(f"  [Symbol] Embedding {symbol.symbol_type} '{symbol.name}' in file: {file_path} (lines {symbol.line_start}-{symbol.line_end})")
                 texts_to_embed.append(text)
                 symbols_to_update.append(symbol)
 
@@ -388,6 +407,7 @@ class EmbeddingService:
                 for symbol, vector in zip(symbols_to_update, vectors):
                     if vector:
                         symbol.embedding = vector
+                        logger.info(f"    -> Generated vector preview: {[round(x, 4) for x in vector[:5]]}... (dimensions: {len(vector)})")
                     symbol.is_embedded = True
                     stats['symbols'] += 1
             except Exception as e:
@@ -395,20 +415,25 @@ class EmbeddingService:
 
         # 2. Embed pending FileChunks
         chunk_stmt = (
-            select(FileChunk)
+            select(FileChunk, IndexedFile.path)
+            .join(IndexedFile, FileChunk.file_id == IndexedFile.id)
             .where(FileChunk.is_embedded == False)
             .limit(limit)
         )
         chunk_res = await self.db.execute(chunk_stmt)
-        chunks = chunk_res.scalars().all()
+        chunk_rows = chunk_res.all()
 
-        if chunks:
-            texts_to_embed = [c.content for c in chunks]
+        if chunk_rows:
+            texts_to_embed = [row[0].content for row in chunk_rows]
+            logger.info(f"Found {len(chunk_rows)} pending file chunks to embed.")
+            for chunk, file_path in chunk_rows:
+                logger.info(f"  [Chunk] Embedding file chunk {chunk.chunk_index} in file: {file_path} (length: {len(chunk.content)} chars)")
             try:
                 vectors = await self.client.get_embeddings(texts_to_embed)
-                for chunk, vector in zip(chunks, vectors):
+                for (chunk, file_path), vector in zip(chunk_rows, vectors):
                     if vector:
                         chunk.embedding = vector
+                        logger.info(f"    -> Generated vector preview: {[round(x, 4) for x in vector[:5]]}... (dimensions: {len(vector)})")
                     chunk.is_embedded = True
                     stats['chunks'] += 1
             except Exception as e:

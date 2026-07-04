@@ -118,7 +118,7 @@ async def test_user_registration_and_login(client, db_session):
     # 2. Duplicate registration attempt
     response = await client.post("/api/v1/auth/register", json=reg_data)
     assert response.status_code == 400
-    assert "already exists" in response.json()["detail"]
+    assert "already exists" in response.json()["error"]["message"]
 
     # 3. Login
     login_data = {
@@ -171,7 +171,7 @@ async def test_token_refresh_and_blacklist(client, db_session):
         json={"refresh_token": refresh_token}
     )
     assert reuse_response.status_code == 401
-    assert "revoked" in reuse_response.json()["detail"]
+    assert "revoked" in reuse_response.json()["error"]["message"]
 
 
 @pytest.mark.asyncio
@@ -238,7 +238,7 @@ async def test_rbac_access_control(client, db_session):
     # Cannot access /admin-only (authority '1')
     res_admin_only = await client.get("/api/v1/test-rbac/admin-only", headers=headers)
     assert res_admin_only.status_code == 403
-    assert "insufficient permissions" in res_admin_only.json()["detail"]
+    assert "insufficient permissions" in res_admin_only.json()["error"]["message"]
 
     # 2. Promote Alice to Admin (authority '1') directly in DB
     result = await db_session.execute(

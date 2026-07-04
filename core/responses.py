@@ -33,6 +33,7 @@ class ApiErrorDetail(BaseModel):
 
     code: str
     message: str
+    reason: int | None = None
     details: Any | None = None
 
 
@@ -45,6 +46,7 @@ class ApiErrorResponse(BaseModel):
         "error": {
             "code": "ERROR_CODE",
             "message": "Human readable message",
+            "reason": 40001,
             "details": null
         }
     }
@@ -74,6 +76,7 @@ def success_response(data: T, message: str | None = None) -> dict[str, Any]:
 def error_response(
     code: str,
     message: str,
+    reason: int | None = None,
     details: Any | None = None,
 ) -> dict[str, Any]:
     """
@@ -82,16 +85,23 @@ def error_response(
     Args:
         code: Error code (e.g., "VALIDATION_ERROR")
         message: Human readable error message
+        reason: Optional numeric error code (e.g., 40001)
         details: Optional error details
 
     Returns:
         Dict with error envelope format
     """
+    err_detail = {
+        'code': code,
+        'message': message,
+    }
+    if reason is not None:
+        err_detail['reason'] = reason
+    if details is not None:
+        err_detail['details'] = details
+        
     return {
         'success': False,
-        'error': {
-            'code': code,
-            'message': message,
-            'details': details,
-        },
+        'error': err_detail,
     }
+
