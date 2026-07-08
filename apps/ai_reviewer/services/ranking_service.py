@@ -21,18 +21,20 @@ findings the highest priority for display and comment posting.
 from dataclasses import dataclass
 from enum import Enum
 
-from core.logging_config import get_logger
+from core.logger import get_logger
 from apps.ai_reviewer.models.layer import Layer
 
 logger = get_logger(__name__)
 
 
+from infra.config import settings
+
 # ─────────────────────────────────────────────
 # Constants
 # ─────────────────────────────────────────────
 
-# Minimum score to keep a finding
-MIN_SCORE_THRESHOLD = 0.35
+# Minimum score to keep a finding (read from settings)
+MIN_SCORE_THRESHOLD = settings.review_min_score_threshold
 
 # Severity → numeric weight mapping
 SEVERITY_WEIGHTS: dict[str, float] = {
@@ -283,6 +285,13 @@ class RankingService:
             kept=len(kept),
             dropped=dropped_count,
             threshold=self.threshold,
+        )
+
+        logger.info(
+            f"Ranking Summary:\n"
+            f"  Total input findings = {report.total}\n"
+            f"  Kept (score >= {report.threshold}) = {report.kept}\n"
+            f"  Dropped (score < {report.threshold}) = {report.dropped}"
         )
 
         logger.info(

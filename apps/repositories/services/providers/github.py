@@ -9,7 +9,7 @@ from typing import Any
 
 import httpx
 
-from core.logging_config import get_logger
+from core.logger import get_logger
 from apps.repositories.services.providers.base import (
     FileChange,
     GitProvider,
@@ -241,10 +241,11 @@ class GitHubProvider(GitProvider):
 
         data = {
             'commit_id': commit_sha,
-            'body': body,
             'event': 'COMMENT',
             'comments': github_comments,
         }
+        if body:
+            data['body'] = body
 
         return await self._request(
             'POST',
@@ -283,6 +284,7 @@ class GitHubProvider(GitProvider):
             source_branch=data['head']['ref'],
             target_branch=data['base']['ref'],
             html_url=data['html_url'],
+            body=data.get('body'),
         )
 
     def _normalize_file_change(self, data: dict) -> FileChange:
@@ -394,6 +396,68 @@ class GitHubProvider(GitProvider):
             events=data['events'],
             active=data['active'],
         )
+
+    async def list_pr_comments(
+        self,
+        repo_identifier: str | int,
+        pr_number: int,
+    ) -> list[dict]:
+        """List comments on a pull request."""
+        parsed = self._parse_repo_identifier(repo_identifier)
+
+        if isinstance(parsed, int):
+            repo = await self.get_repo_by_id(parsed)
+            owner, name = repo['full_name'].split('/')
+        else:
+            owner, name = parsed
+
+        return await self._request(
+            'GET',
+            f'/repos/{owner}/{name}/issues/{pr_number}/comments',
+        )
+
+    async def create_pr_comment(
+        self,
+        repo_identifier: str | int,
+        pr_number: int,
+        body: str,
+    ) -> dict:
+        """Create a comment on a pull request."""
+        parsed = self._parse_repo_identifier(repo_identifier)
+
+        if isinstance(parsed, int):
+            repo = await self.get_repo_by_id(parsed)
+            owner, name = repo['full_name'].split('/')
+        else:
+            owner, name = parsed
+
+        return await self._request(
+            'POST',
+            f'/repos/{owner}/{name}/issues/{pr_number}/comments',
+            json={'body': body},
+        )
+
+    async def update_pr_comment(
+        self,
+        repo_identifier: str | int,
+        comment_id: int,
+        body: str,
+    ) -> dict:
+        """Update an existing pull request comment."""
+        parsed = self._parse_repo_identifier(repo_identifier)
+
+        if isinstance(parsed, int):
+            repo = await self.get_repo_by_id(parsed)
+            owner, name = repo['full_name'].split('/')
+        else:
+            owner, name = parsed
+
+        return await self._request(
+            'PATCH',
+            f'/repos/{owner}/{name}/issues/comments/{comment_id}',
+            json={'body': body},
+        )
+
 
 
 # Register GitHubProvider with factory

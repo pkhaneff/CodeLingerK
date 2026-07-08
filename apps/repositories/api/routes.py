@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from apps.repositories.api.dependencies import create_provider_for_user, get_git_provider
 from apps.auth.api.middleware import get_current_user
 from core.responses import success_response
-from core.logging_config import get_logger
+from core.logger import get_logger
 from infra.config import settings
 from infra.database import get_db
 from apps.auth.models.user import User

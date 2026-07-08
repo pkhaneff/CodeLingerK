@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
 
-from core.logging_config import get_logger
+from core.logger import get_logger
 from apps.ai_reviewer.models.pull_request import PullRequest, PullRequestStatus
 from apps.ai_reviewer.models.snapshot import Snapshot, SnapshotStatus
 from apps.repositories.models.repository import Repository

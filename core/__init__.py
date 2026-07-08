@@ -14,7 +14,7 @@ from core.models import CodeSymbol, ChangeUnit
 from core.git_manager import GitManager
 from core.diff_parser import DiffParser, ParsedDiff, DiffHunk
 from core.change_extractor import ChangeExtractor
-from core.logging_config import setup_logging, get_logger
+from core.logger import configure_logging, get_logger
 
 __all__ = [
     'CodeSymbol',
@@ -24,7 +24,7 @@ __all__ = [
     'ParsedDiff',
     'DiffHunk',
     'ChangeExtractor',
-    'setup_logging',
+    'configure_logging',
     'get_logger',
 ]
 

@@ -5,7 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from infra.config import settings
-from core.logging_config import get_logger
+from core.logger import get_logger
 from apps.code_analyzer.models.code_graph import Symbol, FileChunk, IndexedFile
 
 logger = get_logger(__name__)

@@ -21,7 +21,8 @@ from pathlib import Path
 from infra.config import settings
 
 from core.diff_parser import DiffParser, ParsedDiff
-from core.logging_config import get_logger
+from core.logger import get_logger
+from apps.ai_reviewer.tokenizer import Tokenizer
 from apps.ai_reviewer.models.snapshot import Snapshot, SnapshotStatus
 
 logger = get_logger(__name__)
@@ -116,6 +117,7 @@ class ContextService:
         self,
         db: AsyncSession,
         max_tokens: int | None = None,
+        tokenizer: Tokenizer | None = None,
     ):
         """
         Initialize context service.
@@ -123,9 +125,22 @@ class ContextService:
         Args:
             db: Database session
             max_tokens: Maximum tokens allowed in context
+            tokenizer: Tokenizer strategy instance
         """
         self.db = db
         self.max_tokens = max_tokens or getattr(settings, 'ai_soft_budget', DEFAULT_MAX_CONTEXT_TOKENS)
+        
+        if tokenizer is None:
+            from apps.ai_reviewer.tokenizer import TokenizerFactory
+            self.tokenizer = TokenizerFactory.get_tokenizer(
+                getattr(settings, 'ai_provider', 'openai'),
+                getattr(settings, 'ai_model', 'gpt-4')
+            )
+        else:
+            self.tokenizer = tokenizer
+            
+        from apps.ai_reviewer.services.context_formatter import ReviewContextFormatter
+        self.formatter = ReviewContextFormatter(self.tokenizer)
 
     async def build_context(self, snapshot: Snapshot) -> SnapshotContext:
         """
@@ -388,14 +403,8 @@ class ContextService:
                 f.hunks = f.hunks[:5]
 
     def _count_tokens(self, text: str) -> int:
-        if not text:
-            return 0
-        try:
-            import tiktoken
-            encoding = tiktoken.get_encoding('cl100k_base')
-            return len(encoding.encode(text))
-        except Exception:
-            return len(text) // 4
+        """Deprecated - count tokens using the unified tokenizer strategy."""
+        return self.tokenizer.count_tokens(text)
 
     def _parse_diff(self, diff_content: str) -> list[FileContext]:
         """
@@ -485,89 +494,12 @@ class ContextService:
         include_full_diff: bool = True,
     ) -> str:
         """
-        Build context string for AI review prompt.
-
-        Args:
-            context: Parsed snapshot context
-            include_full_diff: Whether to include full diff content
-
-        Returns:
-            Formatted context string for AI prompt
+        Deprecated - build context using the unified context formatter.
         """
-        parts = []
-
-        # Header
-        parts.append(f'## Code Review Context')
-        parts.append(f'Commit: {context.commit_sha[:8]}')
-        parts.append(f'Files Changed: {context.file_count}')
-        parts.append(f'Total Changes: +{context.total_additions}/-{context.total_deletions}')
-        parts.append('')
-
-        # Files summary
-        parts.append('### Changed Files')
-        for f in context.files:
-            status_emoji = {
-                'added': '➕',
-                'deleted': '➖',
-                'modified': '📝',
-                'renamed': '📛',
-            }.get(f.status, '📄')
-            parts.append(f'- {status_emoji} `{f.file_path}` (+{f.additions}/-{f.deletions})')
-
-        parts.append('')
-
-        # Detailed diffs
-        if include_full_diff:
-            parts.append('### Detailed Changes')
-            parts.append('')
-
-            for f in context.files:
-                parts.append(f'#### {f.file_path}')
-
-                for i, hunk in enumerate(f.hunks):
-                    parts.append(f'```diff')
-                    parts.append(f'@@ -{hunk["old_start"]},{hunk["old_count"]} +{hunk["new_start"]},{hunk["new_count"]} @@')
-
-                    for deleted in hunk.get('deleted_lines', []):
-                        parts.append(f'-{deleted["content"]}')
-                    for added in hunk.get('added_lines', []):
-                        parts.append(f'+{added["content"]}')
-
-                    parts.append('```')
-                    parts.append('')
-
-        # Level 2 Context (Surrounding functions)
-        level2 = getattr(context, 'level2_functions', None)
-        if level2:
-            parts.append('### Code Context (Surrounding Functions)')
-            for file_path, functions in level2.items():
-                if not functions:
-                    continue
-                parts.append(f'#### Surrounding code in `{file_path}`:')
-                for fn in functions:
-                    parts.append(f'- {fn["symbol_type"].upper()}: {fn["name"]} (lines {fn["lines"]}):')
-                    parts.append('```python')
-                    parts.append(fn['code'])
-                    parts.append('```')
-                parts.append('')
-
-        # Level 3 Context (Call Graph dependencies)
-        level3 = getattr(context, 'level3_dependencies', None)
-        if level3:
-            parts.append('### Semantic Call Relationships (Code Graph)')
-            for dep in level3:
-                parts.append(f'- {dep}')
-            parts.append('')
-
-        # Level 4 Context (Semantic search references)
-        level4 = getattr(context, 'level4_semantic_search', None)
-        if level4:
-            parts.append('### Relevant Code References (Semantic Search)')
-            for res in level4:
-                parts.append(res)
-            parts.append('')
-
-        return '\n'.join(parts)
+        return self.formatter.format_context(
+            context=context,
+            limit_hunk_lines=None if include_full_diff else 20
+        )
 
     async def get_snapshot(self, snapshot_id: str) -> Snapshot | None:
         """Get snapshot by ID."""

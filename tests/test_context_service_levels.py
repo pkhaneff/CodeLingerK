@@ -61,25 +61,25 @@ async def test_pruner_order():
     assert len(context.level2_functions) == 1
 
     # 2. Set lower budget: should prune level 4 first
-    # Total tokens is around 1500. Let's set budget to 1000.
-    service = ContextService(mock_db, max_tokens=1000)
+    # Total tokens is around 2076. Let's set budget to 1600.
+    service = ContextService(mock_db, max_tokens=1600)
     service._prune_context(context)
     assert len(context.level4_semantic_search) == 0
     assert len(context.level3_dependencies) == 1
 
     # 3. Set budget even lower: should prune level 3
-    # Remaining tokens is around 1000. Set budget to 500.
-    service = ContextService(mock_db, max_tokens=500)
+    # Remaining tokens is around 1576. Set budget to 1100.
+    service = ContextService(mock_db, max_tokens=1100)
     service._prune_context(context)
     assert len(context.level3_dependencies) == 0
     assert len(context.level2_functions) == 1
-    # Check that comments/docstrings are still there because 500 budget was met
+    # Check that comments/docstrings are still there because 1100 budget was met
     code = context.level2_functions['src/foo.py'][0]['code']
     assert '# Comment' in code
     assert '"""Docstring"""' in code
 
-    # 4. Set budget to 200: should strip comments and docstrings
-    service = ContextService(mock_db, max_tokens=200)
+    # 4. Set budget to 350: should strip comments and docstrings
+    service = ContextService(mock_db, max_tokens=350)
     service._prune_context(context)
     code = context.level2_functions['src/foo.py'][0]['code']
     assert '# Comment' not in code
@@ -87,14 +87,14 @@ async def test_pruner_order():
     # But files still unchanged
     assert len(context.files) == 2
 
-    # 5. Set budget to 150: should drop test files
-    service = ContextService(mock_db, max_tokens=150)
+    # 5. Set budget to 200: should drop test files
+    service = ContextService(mock_db, max_tokens=200)
     service._prune_context(context)
     file_paths = [f.file_path for f in context.files]
     assert 'tests/test_foo.py' not in file_paths
     assert len(context.files) == 1
 
-    # 6. Set budget to 80: should drop level 2 functions completely
-    service = ContextService(mock_db, max_tokens=80)
+    # 6. Set budget to 100: should drop level 2 functions completely
+    service = ContextService(mock_db, max_tokens=100)
     service._prune_context(context)
     assert len(context.level2_functions) == 0

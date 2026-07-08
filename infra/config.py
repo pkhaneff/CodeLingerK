@@ -140,9 +140,30 @@ class Settings(BaseSettings):
     ai_model: str = 'gpt-4o'  # Model name varies by provider
     ai_max_tokens: int = 8192  # Default max output tokens (used if per-pass value not set)
     ai_temperature: float = 0.3
-    ai_timeout: int = 120
-    ai_max_retries: int = 3
+    ai_timeout: int = 45  # Reduced from 120 to fail/fallback faster
+    ai_max_retries: int = 1  # Reduced from 3 to fallback faster
     ai_retry_delay: float = 1.0
+
+    # Fallback configuration
+    ai_fallback_providers: str = ''  # Comma-separated list of fallback providers (e.g. "openai,claude")
+    ai_fallback_models: str = ''  # Comma-separated list of fallback models (e.g. "gpt-4o-mini,claude-3-5-haiku-latest")
+    ai_enable_combined_analysis: bool = True  # Combine understanding, risks, quality, business into 1 pass
+
+    # Pass-specific provider overrides
+    ai_provider_analysis: str = ''
+    ai_provider_comments: str = ''
+    ai_provider_understanding: str = ''
+    ai_provider_risks: str = ''
+    ai_provider_quality: str = ''
+    ai_provider_business: str = ''
+
+    # Pass-specific model overrides
+    ai_model_analysis: str = ''
+    ai_model_comments: str = ''
+    ai_model_understanding: str = ''
+    ai_model_risks: str = ''
+    ai_model_quality: str = ''
+    ai_model_business: str = ''
 
     # Token Budget Configuration
     ai_soft_budget: int = 40000  # Max context tokens for LLM call
@@ -152,6 +173,10 @@ class Settings(BaseSettings):
         "dependencies": 0.15,
         "system_prompt": 0.10
     }
+    ai_model_context_window: int = 64000
+    ai_max_findings_per_chunk: int = 10
+    ai_enable_auto_split_on_truncation: bool = True
+
 
     # Embedding Configuration (for pgvector)
     ai_embedding_model: str = 'text-embedding-3-small'
@@ -164,6 +189,7 @@ class Settings(BaseSettings):
     # - risks/quality/business: produce structured JSON arrays (~2000 tokens output)
     # - comments: produces the largest JSON array with full comment bodies (~4000 tokens)
     # Set to 0 to fall back to ai_max_tokens.
+    ai_max_tokens_analysis: int = 0
     ai_max_tokens_understanding: int = 0
     ai_max_tokens_risks: int = 0
     ai_max_tokens_quality: int = 0
@@ -178,9 +204,10 @@ class Settings(BaseSettings):
         falls back to the global ai_max_tokens value.
 
         Args:
-            pass_name: One of 'understanding', 'risks', 'quality', 'business', 'comments'
+            pass_name: One of 'analysis', 'understanding', 'risks', 'quality', 'business', 'comments'
         """
         per_pass_map = {
+            'analysis': self.ai_max_tokens_analysis,
             'understanding': self.ai_max_tokens_understanding,
             'risks': self.ai_max_tokens_risks,
             'quality': self.ai_max_tokens_quality,
@@ -215,10 +242,37 @@ class Settings(BaseSettings):
         }
         return provider_urls.get(self.ai_provider)
 
+    def get_api_key_for_provider(self, provider: str) -> str:
+        """Get the API key for a specific provider."""
+        if provider == 'openai':
+            return self.openai_api_key or self.ai_api_key
+        elif provider == 'claude':
+            return self.anthropic_api_key or self.ai_api_key
+        elif provider == 'deepseek':
+            if self.ai_provider == 'deepseek':
+                return self.ai_api_key
+            return ''
+        return self.ai_api_key
+
+    def get_base_url_for_provider(self, provider: str) -> str | None:
+        """Get base URL for OpenAI-compatible providers."""
+        if provider == 'deepseek':
+            return 'https://api.deepseek.com'
+        elif provider == 'groq':
+            return 'https://api.groq.com/openai/v1'
+        elif provider == 'openai':
+            return None
+        elif provider == 'claude':
+            return None
+        return self.ai_base_url
+
     # Review Settings
     review_max_context_tokens: int = 50000
-    review_max_comments_per_file: int = 5
-    review_max_comments_per_pr: int = 20
+    review_max_comments_per_file: int = 20
+    review_max_comments_per_pr: int = 100
+    review_min_score_threshold: float = 0.20
+    review_min_confidence: float = 0.35
+    review_intermediate_issue_limit: int = 20
 
     # Queue Settings
     queue_job_timeout_seconds: int = 300

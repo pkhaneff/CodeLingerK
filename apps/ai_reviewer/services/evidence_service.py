@@ -27,7 +27,7 @@ This prevents the LLM from hallucinating file names or line numbers.
 from dataclasses import dataclass, field
 from enum import Enum
 
-from core.logging_config import get_logger
+from core.logger import get_logger
 from apps.ai_reviewer.services.context_service import FileContext, SnapshotContext
 
 logger = get_logger(__name__)
@@ -171,6 +171,8 @@ class EvidenceService:
         self,
         file_path: str,
         line_start: int | None,
+        category: str,
+        title: str,
         seen_signatures: set[str],
     ) -> EvidenceValidation:
         """
@@ -179,6 +181,8 @@ class EvidenceService:
         Args:
             file_path: The file the comment references.
             line_start: The line number the comment references.
+            category: The category of the finding.
+            title: The title of the finding.
             seen_signatures: Set of already-accepted comment signatures to detect dups.
 
         Returns:
@@ -223,7 +227,9 @@ class EvidenceService:
                 )
 
         # Check 3: Duplicate detection
-        signature = f'{file_path}:{line_start}'
+        # Normalize title for consistent duplicate signatures
+        normalized_title = "".join(title.split()).lower()
+        signature = f'{file_path}:{line_start}:{category.lower()}:{normalized_title}'
         if signature in seen_signatures:
             return EvidenceValidation(
                 status=ValidationStatus.FAIL_DUPLICATE,
@@ -261,25 +267,37 @@ class EvidenceService:
         validated = []
         seen_signatures: set[str] = set()
 
+        # Detailed logging counts
+        fail_file_count = 0
+        fail_line_count = 0
+        fail_dup_count = 0
+        low_confidence_count = 0
+        passed_count = 0
+
         for comment in comments:
             file_path = getattr(comment, 'file_path', '')
             line_start = getattr(comment, 'line_start', None)
+            category = getattr(comment, 'category', '')
+            title = getattr(comment, 'title', '') or category or 'Observation'
 
-            result = self.validate_comment(file_path, line_start, seen_signatures)
+            result = self.validate_comment(file_path, line_start, category, title, seen_signatures)
 
             if result.status == ValidationStatus.FAIL_FILE:
                 report.dropped_file += 1
-                logger.debug(f'Evidence FAIL (file): {result.reason}')
+                logger.info(f'Evidence FAIL (file): {result.reason} | Comment: {comment.explanation[:100]}...')
+                fail_file_count += 1
                 continue
 
             if result.status == ValidationStatus.FAIL_LINE:
                 report.dropped_line += 1
-                logger.debug(f'Evidence FAIL (line): {result.reason}')
+                logger.info(f'Evidence FAIL (line): {result.reason} | Comment: {comment.explanation[:100]}...')
+                fail_line_count += 1
                 continue
 
             if result.status == ValidationStatus.FAIL_DUPLICATE:
                 report.dropped_duplicate += 1
-                logger.debug(f'Evidence FAIL (dup): {result.reason}')
+                logger.info(f'Evidence FAIL (dup): {result.reason} | Comment: {comment.explanation[:100]}...')
+                fail_dup_count += 1
                 continue
 
             # Comment passed — apply confidence delta
@@ -288,20 +306,33 @@ class EvidenceService:
 
             # Check minimum confidence threshold
             if adjusted_confidence < min_confidence:
-                report.dropped_file += 1  # Count as low-evidence drop
-                logger.debug(
-                    f'Evidence DROP (low confidence {adjusted_confidence:.2f}): '
-                    f'{file_path}:{line_start}'
+                logger.info(
+                    f'Evidence DROP (low confidence {adjusted_confidence:.2f} < {min_confidence:.2f}): '
+                    f'{file_path}:{line_start} | Comment: {comment.explanation[:100]}...'
                 )
+                low_confidence_count += 1
                 continue
 
             # Mutate confidence on the comment
             object.__setattr__(comment, 'confidence', adjusted_confidence) if hasattr(comment, '__dataclass_fields__') else setattr(comment, 'confidence', adjusted_confidence)
 
-            signature = f'{file_path}:{line_start}'
+            # Normalize title for consistent duplicate signatures
+            normalized_title = "".join(title.split()).lower()
+            signature = f'{file_path}:{line_start}:{category.lower()}:{normalized_title}'
             seen_signatures.add(signature)
             validated.append(comment)
+            passed_count += 1
             report.passed += 1
+
+        logger.info(
+            f"Evidence Validation Summary:\n"
+            f"  Total Input = {report.total}\n"
+            f"  PASS = {passed_count}\n"
+            f"  FAIL_FILE = {fail_file_count}\n"
+            f"  FAIL_LINE = {fail_line_count}\n"
+            f"  FAIL_DUPLICATE = {fail_dup_count}\n"
+            f"  Low Confidence Dropped = {low_confidence_count}"
+        )
 
         logger.info(
             f'Evidence engine: {report.passed}/{report.total} comments passed '
