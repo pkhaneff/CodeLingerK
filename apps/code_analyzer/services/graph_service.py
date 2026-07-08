@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from apps.code_analyzer.repositories.code_graph_repository import CodeGraphRepository
 from core.parser.base_parser import ParsedFile
-from core.logging_config import get_logger
+from core.logger import get_logger
 
 logger = get_logger(__name__)
 

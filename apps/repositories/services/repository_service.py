@@ -15,7 +15,7 @@ from git import Repo as GitRepo
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from core.logging_config import get_logger
+from core.logger import get_logger
 from infra.config import settings
 from apps.repositories.models.repository import IndexStatus, Repository
 from apps.auth.models.user import User

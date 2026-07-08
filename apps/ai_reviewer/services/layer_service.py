@@ -20,7 +20,7 @@ from typing import Any
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from core.logging_config import get_logger
+from core.logger import get_logger
 from apps.ai_reviewer.models.layer import Layer, LayerRange, LayerType
 from apps.ai_reviewer.models.snapshot import Snapshot, SnapshotStatus
 from apps.ai_reviewer.services.context_service import ContextService, FileContext, SnapshotContext

@@ -84,6 +84,10 @@ async def init_db() -> None:
     from apps.auth.models.blacklisted_token import BlacklistedToken
     from apps.repositories.models.repository import Repository
     from apps.ai_reviewer.models.review import Review, ReviewComment
+    from apps.ai_reviewer.models.review_run import ReviewRun
+    from apps.ai_reviewer.models.review_surface import ReviewSurface
+    from apps.ai_reviewer.models.finding import Finding
+    from apps.ai_reviewer.models.file_review_history import FileReviewHistory
     from apps.code_analyzer.models.code_graph import (
         IndexedFile,
         Symbol,

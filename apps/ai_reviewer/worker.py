@@ -5,7 +5,9 @@ Processes jobs from Redis queues in sequence:
     CONTEXT → LAYER → REVIEW → PUBLISH
 
 Run with:
-    python worker.py --queues context,layer,review,publish
+    python apps/ai_reviewer/worker.py --queues context,layer,review,publish
+    or
+    python -m apps.ai_reviewer.worker --queues context,layer,review,publish
 
 Environment variables:
     DATABASE_URL - PostgreSQL connection string
@@ -16,15 +18,19 @@ import asyncio
 import argparse
 import signal
 import sys
+from pathlib import Path
 from typing import Any
 from uuid import UUID
 
-from core.logging_config import setup_logging, get_logger
+# Add project root to sys.path to allow running this file directly
+sys.path.append(str(Path(__file__).parent.parent.parent))
+
+from core.logger import configure_logging, get_logger
 from infra.database import get_db_context
 from infra.redis_client import redis_client
 from apps.ai_reviewer.models.review_job import JobType
 from apps.ai_reviewer.models.snapshot import Snapshot, SnapshotStatus
-from apps.ai_reviewer.services.queue_service import QueueService
+from apps.ai_reviewer.integrations.queue_service import QueueService
 
 logger = get_logger(__name__)
 
@@ -330,7 +336,6 @@ class Worker:
             'tokens_used': review_result.total_tokens,
         }
 
-
     async def _process_publish(self, db: Any, snapshot_id: str) -> dict:
         """
         Publish review to GitHub.
@@ -339,7 +344,7 @@ class Worker:
         """
         from sqlalchemy import select
         from sqlalchemy.orm import selectinload
-        from apps.ai_reviewer.services.github_sync_service import GitHubSyncService
+        from apps.ai_reviewer.integrations.github_sync_service import GitHubSyncService
         from apps.ai_reviewer.services.ai_review_service import AIReviewService
 
         # Get snapshot with pull_request loaded
@@ -395,7 +400,7 @@ class Worker:
 
 async def main(args: argparse.Namespace) -> None:
     """Main entry point."""
-    setup_logging(level=args.log_level)
+    configure_logging()
 
     worker = Worker(
         queues=args.queues.split(','),

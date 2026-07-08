@@ -14,7 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from core.logging_config import get_logger
+from core.logger import get_logger
 from infra.database import get_db
 from apps.repositories.models.repository import Repository
 from apps.ai_reviewer.models.review_job import JobType
@@ -22,7 +22,7 @@ from apps.auth.models.user import User
 from apps.repositories.services.providers.base import GitProviderType
 from apps.repositories.services.providers.factory import GitProviderFactory
 from apps.ai_reviewer.services.snapshot_service import SnapshotService
-from apps.ai_reviewer.services.queue_service import QueueService
+from apps.ai_reviewer.integrations.queue_service import QueueService
 from apps.ai_reviewer.api.webhooks_parser import (
     NormalizedWebhookPayload,
     WebhookPayloadParser,

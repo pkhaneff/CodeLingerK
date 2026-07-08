@@ -12,7 +12,7 @@ from urllib.parse import quote
 
 import httpx
 
-from core.logging_config import get_logger
+from core.logger import get_logger
 from apps.repositories.services.providers.base import (
     FileChange,
     GitProvider,
@@ -233,11 +233,12 @@ class GitLabProvider(GitProvider):
         project_id = self._parse_repo_identifier(repo_identifier)
 
         # First, post the summary as a note
-        await self._request(
-            'POST',
-            f'/projects/{project_id}/merge_requests/{pr_number}/notes',
-            json={'body': body},
-        )
+        if body:
+            await self._request(
+                'POST',
+                f'/projects/{project_id}/merge_requests/{pr_number}/notes',
+                json={'body': body},
+            )
 
         # Then post each inline comment as a discussion
         results = []
@@ -298,6 +299,7 @@ class GitLabProvider(GitProvider):
             source_branch=data['source_branch'],
             target_branch=data['target_branch'],
             html_url=data['web_url'],
+            body=data.get('description'),
         )
 
     def _normalize_file_change(self, data: dict) -> FileChange:
@@ -433,6 +435,33 @@ class GitLabProvider(GitProvider):
             events=events,
             active=True,  # GitLab doesn't have an 'active' field, hooks are always active
         )
+
+    async def list_pr_comments(
+        self,
+        repo_identifier: str | int,
+        pr_number: int,
+    ) -> list[dict]:
+        """List comments on a pull request."""
+        raise NotImplementedError("list_pr_comments not implemented for GitLab")
+
+    async def create_pr_comment(
+        self,
+        repo_identifier: str | int,
+        pr_number: int,
+        body: str,
+    ) -> dict:
+        """Create a comment on a pull request."""
+        raise NotImplementedError("create_pr_comment not implemented for GitLab")
+
+    async def update_pr_comment(
+        self,
+        repo_identifier: str | int,
+        comment_id: int,
+        body: str,
+    ) -> dict:
+        """Update an existing pull request comment."""
+        raise NotImplementedError("update_pr_comment not implemented for GitLab")
+
 
 
 # Register GitLabProvider with factory

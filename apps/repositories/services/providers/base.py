@@ -63,6 +63,7 @@ class PullRequestInfo(TypedDict):
     source_branch: str
     target_branch: str
     html_url: str
+    body: str | None
 
 
 class FileChange(TypedDict):
@@ -341,3 +342,62 @@ class GitProvider(ABC):
             WebhookInfo or None if not found
         """
         pass
+
+    @abstractmethod
+    async def list_pr_comments(
+        self,
+        repo_identifier: str | int,
+        pr_number: int,
+    ) -> list[dict]:
+        """
+        List comments on a pull request.
+
+        Args:
+            repo_identifier: Repository ID or full_name
+            pr_number: Pull request number
+
+        Returns:
+            List of comments
+        """
+        pass
+
+    @abstractmethod
+    async def create_pr_comment(
+        self,
+        repo_identifier: str | int,
+        pr_number: int,
+        body: str,
+    ) -> dict:
+        """
+        Create a comment on a pull request.
+
+        Args:
+            repo_identifier: Repository ID or full_name
+            pr_number: Pull request number
+            body: Comment body text
+
+        Returns:
+            Created comment details
+        """
+        pass
+
+    @abstractmethod
+    async def update_pr_comment(
+        self,
+        repo_identifier: str | int,
+        comment_id: int,
+        body: str,
+    ) -> dict:
+        """
+        Update an existing pull request comment.
+
+        Args:
+            repo_identifier: Repository ID or full_name
+            comment_id: ID of the comment to update
+            body: New comment body text
+
+        Returns:
+            Updated comment details
+        """
+        pass
+

@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from core.logging_config import get_logger
+from core.logger import get_logger
 from apps.ai_reviewer.models.memory import (
     AcceptedDecision,
     IgnoredPattern,

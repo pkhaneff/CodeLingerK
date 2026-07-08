@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from infra.config import settings
 from infra.redis_client import redis_client
 from apps.auth.models.user import User
-from core.logging_config import get_logger
+from core.logger import get_logger
 
 logger = get_logger(__name__)
 

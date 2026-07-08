@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Protocol, runtime_checkable
 
-from core.logging_config import get_logger
+from core.logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -41,10 +41,14 @@ class AITruncationError(ValueError):
         self.output_tokens = output_tokens
         self.max_tokens = max_tokens
         super().__init__(
-            f'AI response truncated: output hit max_tokens={max_tokens} on attempt {attempt}. '
-            f'Retrying is futile with the same token limit. '
-            f'Fix: set AI_MAX_TOKENS=8192 (or higher) in .env, '
-            f'or set AI_MAX_TOKENS_COMMENTS=8192 for the specific pass.'
+            f'AI response was truncated because the output reached the configured token limit ({max_tokens} tokens).\n\n'
+            f'This usually means the request asked the model to produce too much in one response.\n\n'
+            f'Recommended actions:\n'
+            f'- Split the review chunk into smaller chunks.\n'
+            f'- Reduce max findings per pass.\n'
+            f'- Use compact JSON output.\n'
+            f'- Render final comments in a separate step.\n'
+            f'- Increase max tokens only as a temporary fallback.'
         )
 
 
@@ -141,6 +145,8 @@ class BaseAIClient:
 
     def __init__(self, config: AIClientConfig):
         self.config = config
+        from apps.ai_reviewer.tokenizer import TokenizerFactory
+        self.tokenizer = TokenizerFactory.get_tokenizer(config.provider.value if hasattr(config.provider, 'value') else str(config.provider), config.model)
 
     async def complete_with_retry(
         self,
@@ -190,7 +196,7 @@ class BaseAIClient:
                     logger.error(
                         f'AI response truncated (finish_reason=length) on attempt {attempt + 1}. '
                         f'output_tokens={response.output_tokens} hit max_tokens={effective_max_tokens}. '
-                        f'NOT retrying — increase AI_MAX_TOKENS in .env to fix this.'
+                        f'NOT retrying with same token limit.'
                     )
                     raise AITruncationError(
                         output_tokens=response.output_tokens,
@@ -246,24 +252,9 @@ class BaseAIClient:
 
     def count_tokens(self, text: str) -> int:
         """
-        Count tokens in text.
-        
-        Attempts to use tiktoken matching the configured model name,
-        falling back to cl100k_base or character-based estimation on failure.
+        Count tokens in text using the configured tokenizer strategy.
         """
-        if not text:
-            return 0
-        try:
-            import tiktoken
-            model_name = self.config.model
-            try:
-                encoding = tiktoken.encoding_for_model(model_name)
-            except KeyError:
-                encoding = tiktoken.get_encoding("cl100k_base")
-            return len(encoding.encode(text))
-        except Exception:
-            # Fallback to character-based estimation (approx. 4 characters per token)
-            return len(text) // 4
+        return self.tokenizer.count_tokens(text)
 
 
 
@@ -386,14 +377,28 @@ class OpenAICompatibleClient(BaseAIClient):
             messages.append({'role': 'system', 'content': system_prompt})
         messages.append({'role': 'user', 'content': prompt})
 
+        limit_tokens = max_tokens or self.config.max_tokens
+        # Cap max output tokens for models known to have a 4096 limit (like gpt-3.5-turbo, gpt-4, gpt-4-turbo)
+        if self.config.model.startswith(('gpt-3.5', 'gpt-4')) and not self.config.model.startswith('gpt-4o'):
+            limit_tokens = min(limit_tokens, 4096)
         kwargs: dict[str, Any] = {
             'model': self.config.model,
             'messages': messages,
-            'max_tokens': max_tokens or self.config.max_tokens,
-            'temperature': temperature
-            if temperature is not None
-            else self.config.temperature,
         }
+
+        # OpenAI reasoning models (o1, o3, etc.) do not support 'max_tokens'
+        # and require 'max_completion_tokens' instead.
+        is_reasoning_model = self.config.model.startswith(('o1', 'o3'))
+        if is_reasoning_model:
+            kwargs['max_completion_tokens'] = limit_tokens
+            # Older reasoning models (o1-mini, o1-preview) only support temperature = 1.0
+            if self.config.model.startswith(('o1-mini', 'o1-preview')):
+                kwargs['temperature'] = 1.0
+            else:
+                kwargs['temperature'] = temperature if temperature is not None else self.config.temperature
+        else:
+            kwargs['max_tokens'] = limit_tokens
+            kwargs['temperature'] = temperature if temperature is not None else self.config.temperature
         if response_format is not None:
             kwargs['response_format'] = response_format
 
@@ -439,7 +444,40 @@ def create_ai_client_from_settings() -> 'AIClient':
         retry_delay=settings.ai_retry_delay,
     )
 
-    return AIClient(config)
+    # Build fallback configurations
+    fallback_configs = []
+    if getattr(settings, 'ai_fallback_providers', ''):
+        fallback_providers = [p.strip() for p in settings.ai_fallback_providers.split(',') if p.strip()]
+        fallback_models = [m.strip() for m in settings.ai_fallback_models.split(',') if m.strip()]
+        
+        for idx, fp in enumerate(fallback_providers):
+            fp_enum = AIProvider(fp)
+            # Find model for fallback
+            f_model = fallback_models[idx] if idx < len(fallback_models) else ''
+            if not f_model:
+                # Default models per provider
+                default_models = {
+                    'openai': 'gpt-4o-mini',
+                    'claude': 'claude-3-5-haiku-latest',
+                    'deepseek': 'deepseek-chat',
+                    'groq': 'llama-3.1-70b-versatile',
+                }
+                f_model = default_models.get(fp, settings.ai_model)
+                
+            f_config = AIClientConfig(
+                provider=fp_enum,
+                api_key=settings.get_api_key_for_provider(fp),
+                model=f_model,
+                base_url=settings.get_base_url_for_provider(fp),
+                max_tokens=settings.ai_max_tokens,
+                temperature=settings.ai_temperature,
+                timeout=settings.ai_timeout,
+                max_retries=settings.ai_max_retries,
+                retry_delay=settings.ai_retry_delay,
+            )
+            fallback_configs.append(f_config)
+
+    return AIClient(config, fallback_configs=fallback_configs)
 
 
 class AIClient:
@@ -471,24 +509,28 @@ class AIClient:
         AI_BASE_URL=                # For custom providers
     """
 
-    def __init__(self, config: AIClientConfig):
+    def __init__(self, config: AIClientConfig, fallback_configs: list[AIClientConfig] = None):
         """
         Initialize AI client.
 
         Args:
             config: AI configuration
+            fallback_configs: Optional list of fallback configurations
         """
         self.config = config
-        self._client = self._create_client()
+        self.fallback_configs = fallback_configs or []
+        self._client = self._create_client(config)
+        self._fallback_clients = [self._create_client(c) for c in self.fallback_configs]
 
-    def _create_client(self) -> BaseAIClient:
+    def _create_client(self, config: AIClientConfig = None) -> BaseAIClient:
         """Create appropriate client based on provider."""
-        if self.config.provider == AIProvider.CLAUDE:
-            return ClaudeClient(self.config)
-        elif AIProvider.is_openai_compatible(self.config.provider):
-            return OpenAICompatibleClient(self.config)
+        cfg = config or self.config
+        if cfg.provider == AIProvider.CLAUDE:
+            return ClaudeClient(cfg)
+        elif AIProvider.is_openai_compatible(cfg.provider):
+            return OpenAICompatibleClient(cfg)
         else:
-            raise ValueError(f'Unsupported AI provider: {self.config.provider}')
+            raise ValueError(f'Unsupported AI provider: {cfg.provider}')
 
     async def complete(
         self,
@@ -497,15 +539,49 @@ class AIClient:
         max_tokens: int | None = None,
         temperature: float | None = None,
         response_format: dict[str, Any] | None = None,
+        client: BaseAIClient = None,
     ) -> AIResponse:
-        """Generate completion using configured provider."""
-        return await self._client.complete_with_retry(
-            prompt=prompt,
-            system_prompt=system_prompt,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            response_format=response_format,
-        )
+        """Generate completion using configured provider with fallback support."""
+        if client is not None:
+            return await client.complete_with_retry(
+                prompt=prompt,
+                system_prompt=system_prompt,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                response_format=response_format,
+            )
+
+        clients_to_try = [self._client] + self._fallback_clients
+        last_error = None
+
+        for idx, cl in enumerate(clients_to_try):
+            try:
+                return await cl.complete_with_retry(
+                    prompt=prompt,
+                    system_prompt=system_prompt,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    response_format=response_format,
+                )
+            except Exception as e:
+                if isinstance(e, AITruncationError):
+                    raise
+                provider_name = cl.config.provider.value
+                model_name = cl.config.model
+                logger.error(f"Client {provider_name} ({model_name}) completion failed: {e}")
+                last_error = e
+                if idx < len(clients_to_try) - 1:
+                    next_client = clients_to_try[idx + 1]
+                    logger.warning(
+                        f"Falling back to {next_client.config.provider.value} ({next_client.config.model})"
+                    )
+
+        raise last_error or Exception("AI completion failed on all clients in the chain")
+
+    @property
+    def tokenizer(self):
+        """Get the active tokenizer strategy for the primary client."""
+        return self._client.tokenizer
 
     def count_tokens(self, text: str) -> int:
         """Count tokens in text."""
@@ -518,115 +594,111 @@ class AIClient:
         max_tokens: int | None = None,
     ) -> dict[str, Any]:
         """
-        Generate completion expecting JSON response.
+        Generate completion expecting JSON response with fallback support.
 
-        Parses the response as JSON. Handles the DeepSeek-specific behavior
-        where `response_format={'type': 'json_object'}` occasionally causes
-        empty responses — in that case, we retry without the format constraint.
-
-        Args:
-            prompt: Prompt requesting JSON output
-            system_prompt: Optional system prompt
-            max_tokens: Override max output tokens for this call
-
-        Returns:
-            Parsed JSON dict
-
-        Raises:
-            ValueError: If response is not valid JSON after all retries
+        Parses the response as JSON. Handles fallbacks for empty responses,
+        invalid JSON formatting, timeouts, and API exceptions across all configured providers.
         """
         import json
 
-        json_system = (system_prompt or '') + '\n\nRespond only with valid JSON.'
+        clients_to_try = [self._client] + self._fallback_clients
+        last_error = None
 
-        # Attempt 1: Use structured JSON output format (preferred — more reliable)
-        response_format = None
-        if AIProvider.is_openai_compatible(self.config.provider):
-            response_format = {'type': 'json_object'}
-
-        try:
-            response = await self.complete(
-                prompt=prompt,
-                system_prompt=json_system.strip(),
-                max_tokens=max_tokens,
-                response_format=response_format,
-            )
-        except AITruncationError:
-            # Truncation is a config error — the fallback (no response_format)
-            # would use the SAME max_tokens and get truncated again.
-            # Re-raise immediately so _run_pass records it as a pass failure.
-            raise
-        except ValueError as e:
-            # Empty response after all retries (transient provider failure).
-            # Attempt fallback: retry WITHOUT response_format constraint.
-            # Some providers (notably DeepSeek) produce empty responses when
-            # forced into strict JSON mode but the output is complex — removing
-            # the constraint allows the model to respond more freely.
-            if response_format is not None:
-                logger.warning(
-                    f'JSON format mode failed after retries ({e}). '
-                    f'Retrying without response_format constraint (fallback mode).'
-                )
-                response = await self.complete(
-                    prompt=prompt,
-                    system_prompt=json_system.strip(),
-                    max_tokens=max_tokens,
-                    response_format=None,  # No format constraint
-                )
-            else:
-                raise
-
-        content = response.content.strip()
-
-        # Clean up markdown code blocks if they are present
-        if content.startswith('```json'):
-            content = content[7:]
-        elif content.startswith('```'):
-            content = content[3:]
-        if content.endswith('```'):
-            content = content[:-3]
-
-        content_str = content.strip()
-
-        try:
-            # Use strict=False to allow literal newlines/control characters inside JSON string literals
-            return json.loads(content_str, strict=False)
-        except json.JSONDecodeError as e:
-            # Try to clean invalid escape sequences and parse again
+        for idx, client in enumerate(clients_to_try):
             try:
-                cleaned_content = _clean_invalid_json_escapes(content_str)
-                return json.loads(cleaned_content, strict=False)
-            except json.JSONDecodeError:
-                pass
+                json_system = (system_prompt or '') + '\n\nRespond only with valid JSON.'
 
-            # Fallback: search for first '{'/'[' and last '}'/']' to extract JSON
-            first_char_idx = -1
-            start_char = ''
-            for idx, char in enumerate(content_str):
-                if char in ('{', '['):
-                    first_char_idx = idx
-                    start_char = char
-                    break
+                # Try JSON format mode first
+                response_format = None
+                if AIProvider.is_openai_compatible(client.config.provider):
+                    response_format = {'type': 'json_object'}
 
-            if first_char_idx != -1:
-                end_char = '}' if start_char == '{' else ']'
-                last_char_idx = content_str.rfind(end_char)
-                if last_char_idx != -1 and last_char_idx > first_char_idx:
-                    json_str = content_str[first_char_idx:last_char_idx + 1]
-                    try:
-                        cleaned_json = _clean_invalid_json_escapes(json_str)
-                        return json.loads(cleaned_json, strict=False)
-                    except json.JSONDecodeError as inner_e:
-                        logger.error(
-                            f'Failed to parse extracted JSON block: {inner_e}. '
-                            f'Original content: {content_str[:500]}'
+                try:
+                    response = await self.complete(
+                        prompt=prompt,
+                        system_prompt=json_system.strip(),
+                        max_tokens=max_tokens,
+                        response_format=response_format,
+                        client=client,
+                    )
+                except AITruncationError:
+                    raise
+                except ValueError as e:
+                    # Empty response or transient failure
+                    if response_format is not None:
+                        logger.warning(
+                            f'JSON format mode failed for {client.config.provider.value} ({e}). '
+                            f'Retrying without response_format constraint (fallback mode).'
                         )
+                        response = await self.complete(
+                            prompt=prompt,
+                            system_prompt=json_system.strip(),
+                            max_tokens=max_tokens,
+                            response_format=None,
+                            client=client,
+                        )
+                    else:
+                        raise
 
-            logger.error(
-                f'Failed to parse AI response as JSON: {e}. '
-                f'Content (first 500 chars): {content_str[:500]}'
-            )
-            raise ValueError(f'AI response is not valid JSON: {e}')
+                content = response.content.strip()
+
+                # Clean up markdown code blocks if they are present
+                if content.startswith('```json'):
+                    content = content[7:]
+                elif content.startswith('```'):
+                    content = content[3:]
+                if content.endswith('```'):
+                    content = content[:-3]
+
+                content_str = content.strip()
+
+                try:
+                    # Use strict=False to allow literal newlines/control characters inside JSON string literals
+                    return json.loads(content_str, strict=False)
+                except json.JSONDecodeError as e:
+                    # Try to clean invalid escape sequences and parse again
+                    try:
+                        cleaned_content = _clean_invalid_json_escapes(content_str)
+                        return json.loads(cleaned_content, strict=False)
+                    except json.JSONDecodeError:
+                        pass
+
+                    # Fallback: search for first '{'/'[' and last '}'/']' to extract JSON
+                    first_char_idx = -1
+                    start_char = ''
+                    for char_idx, char in enumerate(content_str):
+                        if char in ('{', '['):
+                            first_char_idx = char_idx
+                            start_char = char
+                            break
+
+                    if first_char_idx != -1:
+                        end_char = '}' if start_char == '{' else ']'
+                        last_char_idx = content_str.rfind(end_char)
+                        if last_char_idx != -1 and last_char_idx > first_char_idx:
+                            json_str = content_str[first_char_idx:last_char_idx + 1]
+                            try:
+                                cleaned_json = _clean_invalid_json_escapes(json_str)
+                                return json.loads(cleaned_json, strict=False)
+                            except json.JSONDecodeError:
+                                pass
+
+                    raise ValueError(f'AI response is not valid JSON: {e}')
+
+            except Exception as e:
+                if isinstance(e, AITruncationError):
+                    raise
+                logger.error(
+                    f"JSON completion failed on client {client.config.provider.value} ({client.config.model}): {e}"
+                )
+                last_error = e
+                if idx < len(clients_to_try) - 1:
+                    next_client = clients_to_try[idx + 1]
+                    logger.warning(
+                        f"Falling back to JSON completion on {next_client.config.provider.value} ({next_client.config.model})"
+                    )
+
+        raise last_error or ValueError("JSON completion failed on all clients in the chain")
 
     @property
     def provider(self) -> AIProvider:

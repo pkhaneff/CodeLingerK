@@ -22,7 +22,7 @@ from apps.auth.services.auth_service import auth_service
 from apps.auth.api.middleware import get_current_user, security
 from core.responses import success_response
 from apps.auth.models.user import User
-from core.logging_config import get_logger
+from core.logger import get_logger
 
 logger = get_logger(__name__)
 

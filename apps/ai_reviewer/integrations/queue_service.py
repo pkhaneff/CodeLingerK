@@ -16,7 +16,7 @@ from uuid import uuid4, UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from core.logging_config import get_logger
+from core.logger import get_logger
 from infra.redis_client import redis_client
 from apps.ai_reviewer.models.review_job import ReviewJob, JobStatus, JobType
 
@@ -302,7 +302,22 @@ class QueueService:
             is_valid_uuid = False
             logger.error(f'Job {job_id} has invalid snapshot_id: {snapshot_id}, skipping retry')
 
-        if retry and attempt < max_attempts and is_valid_uuid:
+        # Check snapshot existence in database to prevent foreign key violation on enqueue/retry
+        snapshot_exists = True
+        if self.db and is_valid_uuid:
+            try:
+                from apps.ai_reviewer.models.snapshot import Snapshot
+                result = await self.db.execute(
+                    select(Snapshot).where(Snapshot.id == snapshot_id)
+                )
+                snapshot_exists = result.scalar_one_or_none() is not None
+                if not snapshot_exists:
+                    logger.error(f"Snapshot {snapshot_id} not found in database. Disabling retry to prevent foreign key integrity error.")
+                    retry = False
+            except Exception as se:
+                logger.error(f"Error checking snapshot existence for {snapshot_id}: {se}")
+
+        if retry and attempt < max_attempts and is_valid_uuid and snapshot_exists:
             # Calculate backoff delay
             delay = ReviewJob.calculate_backoff(attempt)
 

@@ -13,7 +13,7 @@ from apps.auth.models.user import User
 from apps.repositories.models.repository import Repository
 from apps.code_analyzer.services.graph_service import GraphService
 from apps.repositories.services.repository_service import RepositoryService
-from core.logging_config import get_logger
+from core.logger import get_logger
 
 logger = get_logger(__name__)
 

@@ -19,7 +19,17 @@ from apps.auth.models.user import User
 from apps.auth.models.role import Role
 from apps.auth.models.blacklisted_token import BlacklistedToken
 from apps.repositories.models.repository import Repository
-from apps.ai_reviewer.models.review import Review
+from apps.ai_reviewer.models.pull_request import PullRequest
+from apps.ai_reviewer.models.snapshot import Snapshot
+from apps.ai_reviewer.models.layer import Layer, LayerRange
+from apps.ai_reviewer.models.review_job import ReviewJob
+from apps.ai_reviewer.models.review import Review, ReviewComment
+from apps.ai_reviewer.models.review_run import ReviewRun
+from apps.ai_reviewer.models.review_surface import ReviewSurface
+from apps.ai_reviewer.models.finding import Finding
+from apps.ai_reviewer.models.file_review_history import FileReviewHistory
+from apps.ai_reviewer.models.memory import RepoRule, IgnoredPattern, AcceptedDecision
+from apps.code_analyzer.models.code_graph import IndexedFile, Symbol, SymbolCall, SymbolImport, SymbolInheritance, FileChunk
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

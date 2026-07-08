@@ -17,7 +17,7 @@ from sqlalchemy.orm import selectinload
 
 from apps.auth.api.middleware import get_current_user
 from core.responses import success_response
-from core.logging_config import get_logger
+from core.logger import get_logger
 from infra.database import get_db
 from apps.ai_reviewer.models.layer import Layer
 from apps.ai_reviewer.models.pull_request import PullRequest
@@ -26,7 +26,7 @@ from apps.ai_reviewer.models.review import Review, ReviewComment
 from apps.ai_reviewer.models.review_job import JobType, ReviewJob
 from apps.ai_reviewer.models.snapshot import Snapshot
 from apps.auth.models.user import User
-from apps.ai_reviewer.services.queue_service import QueueService
+from apps.ai_reviewer.integrations.queue_service import QueueService
 
 logger = get_logger(__name__)
 

@@ -20,7 +20,7 @@ from apps.repositories.models.repository import Repository, IndexStatus
 from apps.code_analyzer.services.graph_service import GraphService
 from core.parser.enhanced_python_parser import EnhancedPythonParser
 from core.parser.base_parser import BaseParser
-from core.logging_config import get_logger
+from core.logger import get_logger
 
 logger = get_logger(__name__)
 
