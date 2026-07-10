@@ -36,6 +36,7 @@ class NormalizedWebhookPayload:
     author: str | None  # PR/MR author username
     should_process: bool  # Whether this event should be processed
     skip_reason: str | None = None  # Reason for skipping (if any)
+    pr_status: str | None = None  # PR status (open, closed, merged)
 
 
 class BasePayloadParser(ABC):
@@ -78,6 +79,13 @@ class GitHubPayloadParser(BasePayloadParser):
         repo = raw.get('repository', {})
         user = pr.get('user', {})
 
+        # Determine normalized PR status
+        gh_state = pr.get('state')
+        if gh_state == 'closed':
+            pr_status = 'merged' if pr.get('merged', False) else 'closed'
+        else:
+            pr_status = gh_state or 'open'
+
         return NormalizedWebhookPayload(
             provider=GitProviderType.GITHUB,
             event_type='pull_request',
@@ -92,6 +100,7 @@ class GitHubPayloadParser(BasePayloadParser):
             author=user.get('login'),
             should_process=should_process,
             skip_reason=None if should_process else f"Action '{action}' not processed",
+            pr_status=pr_status,
         )
 
 
@@ -118,6 +127,16 @@ class GitLabPayloadParser(BasePayloadParser):
             action in self.PROCESSABLE_ACTIONS or state in self.PROCESSABLE_STATES
         )
 
+        gl_state = state
+        if gl_state == 'opened':
+            pr_status = 'open'
+        elif gl_state == 'closed':
+            pr_status = 'closed'
+        elif gl_state == 'merged':
+            pr_status = 'merged'
+        else:
+            pr_status = gl_state or 'open'
+
         return NormalizedWebhookPayload(
             provider=GitProviderType.GITLAB,
             event_type='merge_request',
@@ -136,6 +155,7 @@ class GitLabPayloadParser(BasePayloadParser):
                 if should_process
                 else f"Action/state '{action or state}' not processed"
             ),
+            pr_status=pr_status,
         )
 
 

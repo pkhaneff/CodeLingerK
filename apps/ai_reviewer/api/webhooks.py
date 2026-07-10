@@ -23,15 +23,18 @@ from apps.repositories.services.providers.base import GitProviderType
 from apps.repositories.services.providers.factory import GitProviderFactory
 from apps.ai_reviewer.services.snapshot_service import SnapshotService
 from apps.ai_reviewer.integrations.queue_service import QueueService
+from infra.redis_client import redis_client
 from apps.ai_reviewer.api.webhooks_parser import (
     NormalizedWebhookPayload,
     WebhookPayloadParser,
 )
 from apps.ai_reviewer.api.models import GitHubPushPayload
+from core.middlewares import RateLimiter
 
 logger = get_logger(__name__)
 
 router = APIRouter(tags=['Webhooks'])
+
 
 
 # ─────────────────────────────────────────────────────────────
@@ -94,6 +97,31 @@ async def process_pr_webhook(
     """
     # Check if we should process this event
     if not payload.should_process:
+        # Check if we need to update the status of an existing PR in our DB (e.g. on closed/merged events)
+        if payload.event_type in ('pull_request', 'merge_request') and payload.action in ('closed', 'close', 'merge', 'merged'):
+            try:
+                from apps.ai_reviewer.models.pull_request import PullRequest
+                repo_data = await get_repository_with_owner_by_provider(
+                    db,
+                    provider,
+                    payload.repo_full_name,
+                )
+                if repo_data:
+                    repo, owner = repo_data
+                    result = await db.execute(
+                        select(PullRequest).where(
+                            PullRequest.repository_id == repo.id,
+                            PullRequest.pr_number == payload.pr_number,
+                        )
+                    )
+                    existing_pr = result.scalar_one_or_none()
+                    if existing_pr and payload.pr_status:
+                        existing_pr.status = payload.pr_status
+                        await db.commit()
+                        logger.info(f"Updated PR #{payload.pr_number} status to '{payload.pr_status}' from webhook action '{payload.action}'")
+            except Exception as e:
+                logger.error(f"Failed to update PR status from skipped webhook event: {e}")
+
         return {
             'status': 'skipped',
             'reason': payload.skip_reason,
@@ -176,6 +204,7 @@ async def process_pr_webhook(
         snapshot.status = SnapshotStatus.PENDING.value
         snapshot.error_message = None
         await db.flush()
+        await redis_client.publish_snapshot_status(snapshot.id, snapshot.status)
 
     # ─────────────────────────────────────────────────────────────
     # Phase 2: Enqueue for Processing
@@ -197,6 +226,7 @@ async def process_pr_webhook(
             'provider': provider.value,
             'pr_number': payload.pr_number,
             'repo_full_name': repo.full_name,
+            'repo_id': str(repo.id),
             'owner_id': str(owner.id),
         },
     )

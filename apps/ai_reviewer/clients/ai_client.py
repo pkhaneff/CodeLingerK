@@ -341,14 +341,24 @@ class OpenAICompatibleClient(BaseAIClient):
         self._client = None
 
     def _get_client(self):
-        """Lazy initialize OpenAI client."""
+        """Lazy initialize OpenAI client with granular timeout control."""
         if self._client is None:
             try:
                 from openai import AsyncOpenAI
+                from httpx import Timeout
+
+                # Use granular timeout: short connect/write, longer read for
+                # slow model inference (DeepSeek V4 Pro can take 60-90s)
+                timeout_config = Timeout(
+                    connect=15.0,
+                    read=float(self.config.timeout),
+                    write=15.0,
+                    pool=15.0,
+                )
 
                 client_kwargs = {
                     'api_key': self.config.api_key,
-                    'timeout': self.config.timeout,
+                    'timeout': timeout_config,
                 }
 
                 if self.config.base_url:

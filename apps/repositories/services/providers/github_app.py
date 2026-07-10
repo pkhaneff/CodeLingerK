@@ -341,10 +341,11 @@ class GitHubAppProvider(GitProvider):
 
     def _normalize_pr(self, data: dict) -> PullRequestInfo:
         """Normalize GitHub PR response to PullRequestInfo."""
+        state = 'merged' if data.get('merged', False) else data['state']
         return PullRequestInfo(
             number=data['number'],
             title=data['title'],
-            state=data['state'],
+            state=state,
             head_sha=data['head']['sha'],
             source_branch=data['head']['ref'],
             target_branch=data['base']['ref'],

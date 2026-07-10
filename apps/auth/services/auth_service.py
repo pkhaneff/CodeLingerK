@@ -567,17 +567,24 @@ class AuthService:
     ) -> None:
         """Add a token to the blacklist in database."""
         from apps.auth.models.blacklisted_token import BlacklistedToken
+        from sqlalchemy.dialects.postgresql import insert
+        
         # Make sure expires_at is timezone-naive if stored so
         if expires_at.tzinfo is not None:
             expires_at = expires_at.replace(tzinfo=None)
 
-        blacklisted = BlacklistedToken(
+        # Do not blacklist if token is already expired
+        if expires_at <= datetime.utcnow():
+            return
+
+        stmt = insert(BlacklistedToken).values(
             token=token,
             user_id=user_id,
             expires_at=expires_at,
             blacklisted_at=datetime.utcnow()
-        )
-        db.add(blacklisted)
+        ).on_conflict_do_nothing(index_elements=['token'])
+
+        await db.execute(stmt)
         await db.commit()
 
     async def is_token_blacklisted(
@@ -610,10 +617,7 @@ class AuthService:
             User if token is valid, None otherwise
         """
         try:
-            # 1. Check blacklist
-            if await self.is_token_blacklisted(db, token):
-                return None
-
+            # 1. Verify token signature and expiration first to avoid unnecessary DB queries
             payload = jwt.decode(
                 token,
                 settings.jwt_secret_key,
@@ -623,6 +627,10 @@ class AuthService:
             # 2. Check token type
             token_type = payload.get('type')
             if token_type != 'access':
+                return None
+
+            # 3. Check blacklist AFTER we know it's a valid, unexpired token
+            if await self.is_token_blacklisted(db, token):
                 return None
 
             user_id = payload.get('sub')

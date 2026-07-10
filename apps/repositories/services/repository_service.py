@@ -199,9 +199,27 @@ class RepositoryService:
             webhook_secret=secrets.token_urlsafe(32),
         )
 
+        # Check if there is an active repository for the user. If not, auto-activate this first one!
+        active_repo = await self.get_active_repo()
+        if not active_repo:
+            repo.is_active = True
+
         self.db.add(repo)
         await self.db.commit()
         await self.db.refresh(repo)
+
+        # Log repo_connected activity
+        from apps.activities.services.activity_service import activity_service
+        await activity_service.create_activity(
+            db=self.db,
+            owner_id=self.user.id,
+            repo_id=repo.id,
+            type='repo_connected',
+            status='success',
+            title='Repository Connected',
+            description=f'Repository {repo.full_name} has been successfully connected.',
+            action_url=f'/dashboard/repositories/{repo.id}'
+        )
 
         logger.info(f'Repository added: {repo.full_name} ({provider_type.value})')
 
@@ -236,6 +254,19 @@ class RepositoryService:
         repo.webhook_id = webhook['id']
         await self.db.commit()
 
+        # Log webhook_added activity
+        from apps.activities.services.activity_service import activity_service
+        await activity_service.create_activity(
+            db=self.db,
+            owner_id=repo.owner_id,
+            repo_id=repo.id,
+            type='webhook_added',
+            status='success',
+            title='Webhook Activated',
+            description=f'PR webhook has been successfully activated for {repo.full_name}.',
+            action_url=None
+        )
+
         logger.info(
             f'Webhook registered for {repo.full_name}: '
             f'ID={webhook["id"]}, URL={settings.webhook_url}'
@@ -251,6 +282,8 @@ class RepositoryService:
         repo = await self.get_repo(repo_id)
         if not repo:
             raise ValueError('Repository not found')
+
+        was_active = repo.is_active
 
         if repo.webhook_id:
             try:
@@ -268,6 +301,17 @@ class RepositoryService:
 
         await self.db.delete(repo)
         await self.db.commit()
+
+        # Invariant: If the removed repo was active, make the most recent remaining one active
+        if was_active:
+            query = select(Repository).where(
+                Repository.owner_id == self.user.id
+            ).order_by(Repository.created_at.desc())
+            result = await self.db.execute(query)
+            other_repos = result.scalars().all()
+            if other_repos:
+                other_repos[0].is_active = True
+                await self.db.commit()
 
         logger.info(f'Repository removed: {repo.full_name}')
 
@@ -365,6 +409,19 @@ class RepositoryService:
             repo.webhook_id = webhook['id']
             await self.db.commit()
 
+            # Log webhook_added activity
+            from apps.activities.services.activity_service import activity_service
+            await activity_service.create_activity(
+                db=self.db,
+                owner_id=repo.owner_id,
+                repo_id=repo.id,
+                type='webhook_added',
+                status='success',
+                title='Webhook Activated',
+                description=f'PR webhook has been successfully activated for {repo.full_name}.',
+                action_url=None
+            )
+
             logger.info(f'Webhook installed on {repo.full_name}: {webhook["id"]}')
             return webhook['id']
 
@@ -446,6 +503,24 @@ class RepositoryService:
 
         repo.is_active = False
         await self.db.commit()
+
+        # Invariant: If there is at least one repo, at least one must be active.
+        # Find all other repos for this user, sorted by created_at desc (most recent first)
+        query = select(Repository).where(
+            Repository.owner_id == self.user.id,
+            Repository.id != repo.id
+        ).order_by(Repository.created_at.desc())
+        result = await self.db.execute(query)
+        other_repos = result.scalars().all()
+
+        if other_repos:
+            other_repos[0].is_active = True
+            await self.db.commit()
+        else:
+            # If there are no other repos, this was the only repo, keep it active.
+            repo.is_active = True
+            await self.db.commit()
+
         await self.db.refresh(repo)
 
         logger.info(f'Repository deactivated: {repo.full_name}')

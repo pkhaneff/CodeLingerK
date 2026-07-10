@@ -38,6 +38,10 @@ class RedisClient:
                 settings.redis_url,
                 encoding='utf-8',
                 decode_responses=True,
+                socket_connect_timeout=5,
+                socket_timeout=None,
+                health_check_interval=30,
+                retry_on_timeout=True,
             )
             await self._client.ping()
         except Exception as e:
@@ -148,6 +152,74 @@ class RedisClient:
             await self.delete('oauth', 'state', state)
             return True
         return False
+
+    async def publish_snapshot_status(
+        self,
+        snapshot_id: str,
+        status: str,
+        error_message: str | None = None,
+    ) -> None:
+        """Publish snapshot status update event to Redis Pub/Sub."""
+        if not self._client:
+            logger.warning('Redis client not connected, skipping publish')
+            return
+
+        channel = self._key('snapshot', snapshot_id, 'events')
+        payload = {
+            'snapshot_id': snapshot_id,
+            'status': status,
+            'error_message': error_message,
+        }
+        try:
+            await self._client.publish(channel, json.dumps(payload))
+        except Exception as e:
+            logger.error(f'Failed to publish snapshot status update: {e}')
+
+    async def publish_run_log(
+        self,
+        snapshot_id: str,
+        level: str,
+        message: str,
+    ) -> None:
+        """Publish execution log of a snapshot run to Redis Pub/Sub."""
+        if not self._client:
+            logger.warning('Redis client not connected, skipping publish log')
+            return
+
+        from datetime import datetime
+        channel = self._key('snapshot', snapshot_id, 'logs')
+        payload = {
+            'timestamp': datetime.utcnow().isoformat() + 'Z',
+            'level': level,
+            'message': message,
+        }
+        try:
+            await self._client.publish(channel, json.dumps(payload))
+        except Exception as e:
+            logger.error(f'Failed to publish snapshot run log: {e}')
+
+    async def publish_run_raw(
+        self,
+        snapshot_id: str,
+        raw_msg: str,
+    ) -> None:
+        """Publish raw string log directly to Redis Pub/Sub."""
+        if not self._client:
+            return
+
+        channel = self._key('snapshot', snapshot_id, 'logs')
+        payload = {
+            'timestamp': None,
+            'level': 'INFO',
+            'message': raw_msg,
+        }
+        try:
+            await self._client.publish(channel, json.dumps(payload))
+        except Exception:
+            pass
+
+
+
 
 
 # Global client instance

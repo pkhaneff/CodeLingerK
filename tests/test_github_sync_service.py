@@ -159,7 +159,21 @@ def test_parse_finding_details_new():
     assert details['evidence'] == "The AST filter still allows unsafe nodes during formula evaluation."
     assert details['impact'] == "A crafted formula may execute unintended behavior."
     assert details['fix'] == "Restrict the allowed AST node list."
-
+def test_parse_finding_details_new_no_colon():
+    service = GitHubSyncService(db=None)
+    new_comment = (
+        "**[Security] 🔴 Incomplete AST sanitization**\n\n"
+        "The AST filter still allows unsafe nodes during formula evaluation.\n\n"
+        "**Why this matters**\n"
+        "A crafted formula may execute unintended behavior.\n\n"
+        "**Suggested fix**\n"
+        "Restrict the allowed AST node list."
+    )
+    details = service._parse_finding_details(new_comment, "Security", "Restrict the allowed AST node list.")
+    assert details['title'] == "Incomplete AST sanitization"
+    assert details['evidence'] == "The AST filter still allows unsafe nodes during formula evaluation."
+    assert details['impact'] == "A crafted formula may execute unintended behavior."
+    assert details['fix'] == "Restrict the allowed AST node list."
 
 def test_calculate_signature():
     service = GitHubSyncService(db=None)

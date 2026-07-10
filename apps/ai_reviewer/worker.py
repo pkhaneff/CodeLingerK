@@ -133,46 +133,65 @@ class Worker:
 
         logger.info(f'Processing job {job_id} ({job_type}) for snapshot {snapshot_id[:8]}')
 
-        # Route to appropriate handler
-        if job_type == JobType.CONTEXT.value:
-            result = await self._process_context(db, snapshot_id)
-            await db.commit()
-            # Enqueue next job in pipeline
-            await queue_service.enqueue(
-                JobType.LAYER,
-                snapshot_id,
-                priority=job['priority'],
-            )
+        from core.logger import current_snapshot_id
+        token = current_snapshot_id.set(snapshot_id)
+        try:
+            try:
+                # Route to appropriate handler
+                if job_type == JobType.CONTEXT.value:
+                    result = await self._process_context(db, snapshot_id)
+                    await db.commit()
+                    # Enqueue next job in pipeline
+                    await queue_service.enqueue(
+                        JobType.LAYER,
+                        snapshot_id,
+                        priority=job['priority'],
+                        metadata=job.get('metadata'),
+                    )
 
-        elif job_type == JobType.LAYER.value:
-            result = await self._process_layer(db, snapshot_id)
-            await db.commit()
-            await queue_service.enqueue(
-                JobType.REVIEW,
-                snapshot_id,
-                priority=job['priority'],
-            )
+                elif job_type == JobType.LAYER.value:
+                    result = await self._process_layer(db, snapshot_id)
+                    await db.commit()
+                    await queue_service.enqueue(
+                        JobType.REVIEW,
+                        snapshot_id,
+                        priority=job['priority'],
+                        metadata=job.get('metadata'),
+                    )
 
-        elif job_type == JobType.REVIEW.value:
-            result = await self._process_review(db, snapshot_id)
-            await db.commit()
-            await queue_service.enqueue(
-                JobType.PUBLISH,
-                snapshot_id,
-                priority=job['priority'],
-            )
+                elif job_type == JobType.REVIEW.value:
+                    result = await self._process_review(db, snapshot_id)
+                    await db.commit()
+                    await queue_service.enqueue(
+                        JobType.PUBLISH,
+                        snapshot_id,
+                        priority=job['priority'],
+                        metadata=job.get('metadata'),
+                    )
 
-        elif job_type == JobType.PUBLISH.value:
-            result = await self._process_publish(db, snapshot_id)
-            await db.commit()
-            # No next job - pipeline complete
+                elif job_type == JobType.PUBLISH.value:
+                    result = await self._process_publish(db, snapshot_id)
+                    await db.commit()
+                    # No next job - pipeline complete
+                    await redis_client.publish_run_log(snapshot_id, "INFO", "[EOF]")
 
-        else:
-            raise ValueError(f'Unknown job type: {job_type}')
+                else:
+                    raise ValueError(f'Unknown job type: {job_type}')
 
-        # Mark job complete
-        await queue_service.complete(job_id, result)
-        await db.commit()
+                # Mark job complete
+                await queue_service.complete(job_id, result)
+                await db.commit()
+            except Exception as e:
+                # Publish run log error to Redis before propagating
+                await redis_client.publish_run_log(
+                    snapshot_id,
+                    "ERROR",
+                    f"Tác vụ [{job_type.upper()}] thất bại: {str(e)}"
+                )
+                await redis_client.publish_run_log(snapshot_id, "INFO", "[EOF]")
+                raise
+        finally:
+            current_snapshot_id.reset(token)
 
         logger.info(f'Job {job_id} completed successfully')
 
@@ -197,11 +216,15 @@ class Worker:
         # Update status to CONTEXT_BUILDING
         snapshot.status = SnapshotStatus.CONTEXT_BUILDING.value
         await db.flush()
+        await redis_client.publish_snapshot_status(snapshot.id, snapshot.status)
+        # await redis_client.publish_run_log(snapshot_id, "INFO", "[1/4] Khởi động quá trình xây dựng ngữ cảnh code...")
 
         # Build context using ContextService
         context_service = ContextService(db)
         context = await context_service.build_context(snapshot)
 
+        # msg = f"[1/4] Xây dựng ngữ cảnh thành công. File: {context.file_count}, Tokens: {context.estimated_tokens}"
+        # await redis_client.publish_run_log(snapshot_id, "INFO", msg)
         logger.info(
             f'Built context for snapshot {snapshot_id[:8]}: '
             f'{context.file_count} files, ~{context.estimated_tokens} tokens'
@@ -236,6 +259,8 @@ class Worker:
         # Update status to LAYERING
         snapshot.status = SnapshotStatus.LAYERING.value
         await db.flush()
+        await redis_client.publish_snapshot_status(snapshot.id, snapshot.status)
+        # await redis_client.publish_run_log(snapshot_id, "INFO", "[2/4] Khởi động phân tích phân tầng cấu trúc mã nguồn...")
 
         # Build context first (needed for layer classification)
         context_service = ContextService(db)
@@ -245,6 +270,8 @@ class Worker:
         layer_service = LayerService(db)
         layers = await layer_service.build_layers(snapshot, context)
 
+        # msg = f"[2/4] Phân tầng hoàn thành. Số phân tầng được nhận diện: {len(layers)}"
+        # await redis_client.publish_run_log(snapshot_id, "INFO", msg)
         logger.info(
             f'Built {len(layers)} layers for snapshot {snapshot_id[:8]}'
         )
@@ -296,6 +323,8 @@ class Worker:
         # Update status to REVIEWING
         snapshot.status = SnapshotStatus.REVIEWING.value
         await db.flush()
+        await redis_client.publish_snapshot_status(snapshot.id, snapshot.status)
+        # await redis_client.publish_run_log(snapshot_id, "INFO", "[3/4] Bắt đầu quá trình đánh giá AI (5-pass review pipeline)...")
 
         # Build context
         context_service = ContextService(db)
@@ -323,6 +352,8 @@ class Worker:
         # Save review to database
         review = await ai_service.save_review(snapshot, review_result)
 
+        # msg = f"[3/4] AI đánh giá hoàn tất. Số phát hiện: {len(review_result.comments)}, Đánh giá: {review_result.verdict}"
+        # await redis_client.publish_run_log(snapshot_id, "INFO", msg)
         logger.info(
             f'Completed AI review for snapshot {snapshot_id[:8]}: '
             f'{len(review_result.comments)} comments, verdict={review_result.verdict}'
@@ -361,6 +392,8 @@ class Worker:
         # Update status to PUBLISHING
         snapshot.status = SnapshotStatus.PUBLISHING.value
         await db.flush()
+        await redis_client.publish_snapshot_status(snapshot.id, snapshot.status)
+        # await redis_client.publish_run_log(snapshot_id, "INFO", "[4/4] Bắt đầu đồng bộ đánh giá lên nền tảng Git...")
 
         # Get review for this snapshot
         ai_service = AIReviewService(db)
@@ -370,6 +403,8 @@ class Worker:
             logger.warning(f'No review found for snapshot {snapshot_id[:8]}, skipping publish')
             snapshot.mark_completed()
             await db.flush()
+            await redis_client.publish_snapshot_status(snapshot.id, snapshot.status)
+            # await redis_client.publish_run_log(snapshot_id, "WARNING", "[4/4] Bỏ qua đồng bộ: Không tìm thấy đánh giá nào.")
             return {'status': 'skipped', 'reason': 'no_review'}
 
         # Sync to GitHub
@@ -379,7 +414,14 @@ class Worker:
         # Mark snapshot as completed
         snapshot.mark_completed()
         await db.flush()
+        await redis_client.publish_snapshot_status(snapshot.id, snapshot.status)
 
+        # comments_synced = sync_result.get("comments_synced", 0)
+        # await redis_client.publish_run_log(
+        #     snapshot_id,
+        #     "INFO",
+        #     f"[4/4] Hoàn tất đồng bộ {comments_synced} nhận xét lên PR."
+        # )
         logger.info(
             f'Published review for snapshot {snapshot_id[:8]}: '
             f'{sync_result.get("comments_synced", 0)} comments'

@@ -19,6 +19,7 @@ from apps.auth.models.user import User
 from apps.auth.models.role import Role
 from apps.auth.models.blacklisted_token import BlacklistedToken
 from apps.repositories.models.repository import Repository
+from apps.activities.models.activity import Activity
 from apps.ai_reviewer.models.pull_request import PullRequest
 from apps.ai_reviewer.models.snapshot import Snapshot
 from apps.ai_reviewer.models.layer import Layer, LayerRange

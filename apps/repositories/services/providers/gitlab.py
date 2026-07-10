@@ -291,10 +291,17 @@ class GitLabProvider(GitProvider):
 
     def _normalize_mr(self, data: dict) -> PullRequestInfo:
         """Normalize GitLab MR response to PullRequestInfo."""
+        state = data['state']
+        if state == 'opened':
+            state = 'open'
+        elif state == 'closed':
+            state = 'closed'
+        elif state == 'merged':
+            state = 'merged'
         return PullRequestInfo(
             number=data['iid'],
             title=data['title'],
-            state=data['state'],
+            state=state,
             head_sha=data.get('sha') or data.get('diff_refs', {}).get('head_sha', ''),
             source_branch=data['source_branch'],
             target_branch=data['target_branch'],

@@ -25,6 +25,7 @@ from apps.ai_reviewer.api.webhooks import router as webhook_router
 from apps.repositories.api.routes import router as repo_router
 from apps.code_analyzer.api.routes import router as graph_router
 from apps.ai_reviewer.api.routes import router as reviews_router
+from apps.activities.api.routes import router as activities_router
 from apps.ai_reviewer.worker import Worker
 
 logger = get_logger(__name__)
@@ -118,6 +119,8 @@ def create_app() -> FastAPI:
     app.include_router(graph_router, prefix='/api/v1/repositories')
     app.include_router(reviews_router, prefix='/api/v1')
     app.include_router(webhook_router, prefix='/webhook')
+    app.include_router(activities_router, prefix='/api/activities')
+    app.include_router(activities_router, prefix='/api/v1/activities')
 
     @app.get('/')
     async def root():
