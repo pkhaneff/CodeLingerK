@@ -22,6 +22,7 @@ from infra.config import settings
 
 from core.diff_parser import DiffParser, ParsedDiff
 from core.logger import get_logger
+from infra.redis_client import redis_client
 from apps.ai_reviewer.tokenizer import Tokenizer
 from apps.ai_reviewer.models.snapshot import Snapshot, SnapshotStatus
 
@@ -516,3 +517,4 @@ class ContextService:
         """Update snapshot status."""
         snapshot.status = status.value
         await self.db.flush()
+        await redis_client.publish_snapshot_status(snapshot.id, snapshot.status)

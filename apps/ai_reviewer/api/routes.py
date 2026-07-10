@@ -9,11 +9,16 @@ Provides endpoints to:
 - View queue statistics
 """
 
+import asyncio
+import json
+import redis
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from infra.redis_client import redis_client
 
 from apps.auth.api.middleware import get_current_user
 from core.responses import success_response
@@ -115,6 +120,7 @@ class ReviewResponse(BaseModel):
     status: str
     verdict: str | None
     summary: str | None
+    diagram_mermaid: str | None = None
     ai_model: str | None
     ai_tokens_used: int | None
     processing_time_ms: int | None
@@ -237,9 +243,9 @@ async def get_pull_request(
     current_user: User = Depends(get_current_user),
 ):
     """Get pull request details with snapshots."""
-    # Verify ownership and get PR
+    # Verify ownership and get PR and Repository
     result = await db.execute(
-        select(PullRequest)
+        select(PullRequest, Repository)
         .join(Repository)
         .where(
             PullRequest.repository_id == repo_id,
@@ -247,10 +253,34 @@ async def get_pull_request(
             Repository.owner_id == current_user.id,
         )
     )
-    pr = result.scalar_one_or_none()
+    db_data = result.one_or_none()
 
-    if not pr:
+    if not db_data:
         raise HTTPException(status_code=404, detail='Pull request not found')
+
+    pr, repository = db_data
+
+    # Fetch latest PR info from provider to sync status on-demand
+    try:
+        from apps.repositories.services.providers.base import GitProviderType
+        from apps.repositories.services.providers.factory import GitProviderFactory
+
+        access_token = current_user.get_access_token(repository.provider)
+        if access_token:
+            git_provider = GitProviderFactory.create(
+                GitProviderType(repository.provider), access_token
+            )
+            pr_info = await git_provider.get_pr(
+                repository.full_name,
+                pr_number,
+            )
+            latest_status = pr_info.get('state')
+            if latest_status and pr.status != latest_status:
+                pr.status = latest_status
+                await db.commit()
+                logger.info(f"Synced PR #{pr_number} status to '{latest_status}' on-demand")
+    except Exception as e:
+        logger.warning(f"Failed to sync PR #{pr_number} status with git provider: {e}")
 
     # Get snapshot count
     count_result = await db.execute(
@@ -360,11 +390,24 @@ async def get_snapshot(
             for c in review.comments
         ]
 
+        # Fallback: if diagram_mermaid is NULL in DB, try to extract it from ai_passes on the fly
+        diagram_mermaid = review.diagram_mermaid
+        if not diagram_mermaid and review.ai_passes:
+            for k, v in review.ai_passes.items():
+                if 'understanding' in k and isinstance(v, dict):
+                    diag = v.get('sequence_diagram')
+                    if isinstance(diag, dict) and diag.get('include') and diag.get('mermaid'):
+                        mermaid_text = str(diag.get('mermaid', '')).strip()
+                        if 'sequenceDiagram' in mermaid_text:
+                            diagram_mermaid = mermaid_text
+                    break
+
         review_resp = ReviewResponse(
             id=review.id,
             status=review.status,
             verdict=review.verdict,
             summary=review.summary,
+            diagram_mermaid=diagram_mermaid,
             ai_model=review.ai_model,
             ai_tokens_used=review.ai_tokens_used,
             processing_time_ms=review.processing_time_ms,
@@ -378,6 +421,179 @@ async def get_snapshot(
         layers=layers_resp,
         review=review_resp,
     ))
+
+
+@router.get('/snapshots/{snapshot_id}/events')
+async def get_snapshot_events(
+    snapshot_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Stream snapshot status updates using Server-Sent Events (SSE).
+    """
+    # Verify snapshot exists and user owns the repository
+    result = await db.execute(
+        select(Snapshot)
+        .options(
+            selectinload(Snapshot.pull_request).selectinload(PullRequest.repository)
+        )
+        .where(Snapshot.id == snapshot_id)
+    )
+    snapshot = result.scalar_one_or_none()
+
+    if not snapshot:
+        raise HTTPException(status_code=404, detail='Snapshot not found')
+
+    if snapshot.pull_request.repository.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail='Access denied')
+
+    async def event_generator():
+        channel = f"codelingerk:v1:snapshot:{snapshot_id}:events"
+        
+        # Subscribe to Redis pubsub
+        pubsub = redis_client._client.pubsub()
+        await pubsub.subscribe(channel)
+        
+        try:
+            # Yield the current status immediately
+            initial_payload = {
+                "snapshot_id": snapshot_id,
+                "status": snapshot.status,
+                "error_message": snapshot.error_message,
+            }
+            yield f"data: {json.dumps(initial_payload)}\n\n"
+            
+            # If the snapshot is already in a terminal state, terminate the stream
+            if snapshot.status in ("completed", "failed"):
+                return
+
+            # Listen for updates
+            async for message in pubsub.listen():
+                if message['type'] == 'message':
+                    data = message['data']
+                    yield f"data: {data}\n\n"
+                    
+                    try:
+                        payload = json.loads(data)
+                        if payload.get("status") in ("completed", "failed"):
+                            break
+                    except Exception:
+                        pass
+        except (redis.exceptions.TimeoutError, redis.exceptions.ConnectionError) as e:
+            logger.error(f"Redis connection timeout/error in SSE event stream for snapshot {snapshot_id}: {e}")
+            err_payload = {
+                "snapshot_id": snapshot_id,
+                "status": "failed",
+                "error_message": "Redis connection lost or timed out",
+            }
+            yield f"data: {json.dumps(err_payload)}\n\n"
+        except asyncio.CancelledError:
+            logger.info(f"SSE client disconnected for snapshot {snapshot_id}")
+            raise
+        finally:
+            await pubsub.unsubscribe(channel)
+            await pubsub.aclose()
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Content-Type": "text/event-stream",
+        }
+    )
+
+
+@router.get('/snapshots/{snapshot_id}/logs')
+async def get_snapshot_logs(
+    snapshot_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Stream snapshot execution logs in real-time using Server-Sent Events (SSE).
+    """
+    # Verify snapshot exists and user owns the repository
+    result = await db.execute(
+        select(Snapshot)
+        .options(
+            selectinload(Snapshot.pull_request).selectinload(PullRequest.repository)
+        )
+        .where(Snapshot.id == snapshot_id)
+    )
+    snapshot = result.scalar_one_or_none()
+
+    if not snapshot:
+        raise HTTPException(status_code=404, detail='Snapshot not found')
+
+    if snapshot.pull_request.repository.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail='Access denied')
+
+    async def log_generator():
+        channel = f"codelingerk:v1:snapshot:{snapshot_id}:logs"
+        
+        # Subscribe to Redis pubsub
+        pubsub = redis_client._client.pubsub()
+        await pubsub.subscribe(channel)
+        
+        try:
+            # Yield initial connection message
+            initial_payload = {
+                "timestamp": None,
+                "level": "INFO",
+                "message": "Connected to log stream...",
+            }
+            yield f"data: {json.dumps(initial_payload)}\n\n"
+
+            # If the snapshot is already in a terminal state, terminate immediately
+            if snapshot.status in ("completed", "failed"):
+                eof_payload = {
+                    "timestamp": None,
+                    "level": "INFO",
+                    "message": "[EOF]",
+                }
+                yield f"data: {json.dumps(eof_payload)}\n\n"
+                return
+
+            # Listen for updates
+            async for message in pubsub.listen():
+                if message['type'] == 'message':
+                    data = message['data']
+                    yield f"data: {data}\n\n"
+                    
+                    try:
+                        payload = json.loads(data)
+                        if "[EOF]" in payload.get("message", ""):
+                            break
+                    except Exception:
+                        pass
+        except (redis.exceptions.TimeoutError, redis.exceptions.ConnectionError) as e:
+            logger.error(f"Redis connection timeout/error in SSE log stream for snapshot {snapshot_id}: {e}")
+            err_payload = {
+                "timestamp": None,
+                "level": "ERROR",
+                "message": "Redis connection lost or timed out",
+            }
+            yield f"data: {json.dumps(err_payload)}\n\n"
+        except asyncio.CancelledError:
+            logger.info(f"SSE log client disconnected for snapshot {snapshot_id}")
+            raise
+        finally:
+            await pubsub.unsubscribe(channel)
+            await pubsub.aclose()
+
+    return StreamingResponse(
+        log_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Content-Type": "text/event-stream",
+        }
+    )
+
 
 
 @router.post('/snapshots/{snapshot_id}/retry')

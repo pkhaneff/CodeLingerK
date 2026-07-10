@@ -254,6 +254,11 @@ class AIReviewService:
         """
         Run a single pass with fallback and auto-split triggers.
         Retries only this specific pass if it fails.
+
+        Smart retry logic:
+        - Deterministic errors (model not found, 404) → return immediately, no retry
+        - Truncation → trigger chunk split or compact mode
+        - Transient errors (timeout, network) → retry up to max_attempts
         """
         attempt = 0
         use_compact = False
@@ -271,6 +276,18 @@ class AIReviewService:
 
             if 'error' in p.data:
                 err_msg = str(p.data['error']).lower()
+
+                # Deterministic errors — retrying will ALWAYS produce the same result
+                if any(marker in err_msg for marker in (
+                    'does not exist', 'model_not_found', '404',
+                    'invalid_api_key', 'authentication', '401', '403',
+                )):
+                    logger.error(
+                        f"Pass '{pass_name}' failed with deterministic error on attempt {attempt}: "
+                        f"{err_msg}. NOT retrying — fix configuration."
+                    )
+                    return p
+
                 if 'truncated' in err_msg:
                     # Truncated!
                     if file_count > 1 and getattr(settings, 'ai_enable_auto_split_on_truncation', True):
@@ -282,7 +299,7 @@ class AIReviewService:
                         logger.warning(f"Pass '{pass_name}' truncated on attempt {attempt}. Retrying with use_compact=True")
                         continue
                 else:
-                    # Other error (timeout/network/etc.) - retry this pass
+                    # Transient error (timeout/network/rate-limit) - retry this pass
                     logger.warning(f"Pass '{pass_name}' failed on attempt {attempt}: {err_msg}. Retrying.")
                     continue
             else:
@@ -442,12 +459,39 @@ class AIReviewService:
                             context_str,
                             len(context.files)
                         )
-                        passes.append(analysis)
-                        total_tokens += analysis.tokens_used
-                        
-                        # Unpack analysis data into dummy passes
-                        understanding, risks, quality, business = self._unpack_analysis_pass(analysis)
-                        passes.extend([understanding, risks, quality, business])
+
+                        if 'error' in analysis.data:
+                            # ── FALLBACK: Combined failed → run individual passes ──
+                            logger.warning(
+                                f"Combined analysis failed ({analysis.data['error'][:100]}). "
+                                f"Falling back to individual passes."
+                            )
+                            passes.append(analysis)
+                            total_tokens += analysis.tokens_used
+
+                            understanding = await self._run_pass_with_retry_and_split(
+                                'understanding',
+                                build_understanding_prompt,
+                                context_str,
+                                len(context.files)
+                            )
+                            passes.append(understanding)
+                            total_tokens += understanding.tokens_used
+
+                            # Stage 2: Risks, Quality, Business in parallel
+                            risks, quality, business = await self._run_stage2_passes_with_retry_and_split(
+                                context_str, understanding.data, len(context.files)
+                            )
+                            passes.extend([risks, quality, business])
+                            total_tokens += risks.tokens_used + quality.tokens_used + business.tokens_used
+                        else:
+                            # Combined succeeded → unpack normally
+                            passes.append(analysis)
+                            total_tokens += analysis.tokens_used
+
+                            # Unpack analysis data into dummy passes
+                            understanding, risks, quality, business = self._unpack_analysis_pass(analysis)
+                            passes.extend([understanding, risks, quality, business])
                     else:
                         # Traditional 5-pass pipeline
                         understanding = await self._run_pass_with_retry_and_split(
@@ -601,11 +645,38 @@ class AIReviewService:
                                 chunk_context_str,
                                 chunk.file_count
                             )
-                            passes.append(analysis)
-                            total_tokens += analysis.tokens_used
 
-                            understanding, risks, quality, business = self._unpack_analysis_pass(analysis)
-                            passes.extend([understanding, risks, quality, business])
+                            if 'error' in analysis.data:
+                                # ── FALLBACK: Combined failed → run individual passes ──
+                                logger.warning(
+                                    f"Chunk {idx + 1}: Combined analysis failed "
+                                    f"({analysis.data['error'][:100]}). "
+                                    f"Falling back to individual passes."
+                                )
+                                passes.append(analysis)
+                                total_tokens += analysis.tokens_used
+
+                                understanding = await self._run_pass_with_retry_and_split(
+                                    'understanding',
+                                    build_understanding_prompt,
+                                    chunk_context_str,
+                                    chunk.file_count
+                                )
+                                passes.append(understanding)
+                                total_tokens += understanding.tokens_used
+
+                                risks, quality, business = await self._run_stage2_passes_with_retry_and_split(
+                                    chunk_context_str, understanding.data, chunk.file_count
+                                )
+                                passes.extend([risks, quality, business])
+                                total_tokens += risks.tokens_used + quality.tokens_used + business.tokens_used
+                            else:
+                                # Combined succeeded → unpack normally
+                                passes.append(analysis)
+                                total_tokens += analysis.tokens_used
+
+                                understanding, risks, quality, business = self._unpack_analysis_pass(analysis)
+                                passes.extend([understanding, risks, quality, business])
                         else:
                             understanding = await self._run_pass_with_retry_and_split(
                                 'understanding',
@@ -1170,6 +1241,17 @@ class AIReviewService:
         hash_rows = (await self.db.execute(stmt)).all()
         file_hashes = {path: content_hash for path, content_hash in hash_rows}
 
+        # Extract diagram_mermaid if available
+        diagram_mermaid = None
+        for p in result.passes:
+            if 'understanding' in p.name and isinstance(p.data, dict):
+                diag = p.data.get('sequence_diagram')
+                if isinstance(diag, dict) and diag.get('include') and diag.get('mermaid'):
+                    mermaid_text = str(diag.get('mermaid', '')).strip()
+                    if 'sequenceDiagram' in mermaid_text:
+                        diagram_mermaid = mermaid_text
+                break
+
         # Create Review record
         review = Review(
             repository_id=snapshot.pull_request.repository_id,
@@ -1180,6 +1262,7 @@ class AIReviewService:
             status=ReviewStatus.COMPLETED.value,
             verdict=result.verdict,
             summary=result.summary,
+            diagram_mermaid=diagram_mermaid,
             detailed_feedback={'file_hashes': file_hashes},
             files_analyzed=len(set(c.file_path for c in result.comments)),
             ai_model=self.ai_client.model,

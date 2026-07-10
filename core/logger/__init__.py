@@ -1,9 +1,13 @@
 import logging
 import os
 import sys
+from contextvars import ContextVar
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+
+current_snapshot_id: ContextVar[Optional[str]] = ContextVar("current_snapshot_id", default=None)
+
 
 LOG_FORMAT = (
     "%(asctime)s"
@@ -57,6 +61,29 @@ class AppFormatter(logging.Formatter):
         return super().format(copied_record)
 
 
+class RedisLogHandler(logging.Handler):
+    def __init__(self):
+        super().__init__()
+        self.setFormatter(AppFormatter(use_color=should_use_color()))
+
+    def emit(self, record):
+        snapshot_id = current_snapshot_id.get()
+        if not snapshot_id:
+            return
+        try:
+            msg = self.format(record)
+            import asyncio
+            from infra.redis_client import redis_client
+            try:
+                loop = asyncio.get_running_loop()
+                if loop.is_running():
+                    loop.create_task(redis_client.publish_run_raw(snapshot_id, msg))
+            except RuntimeError:
+                pass
+        except Exception:
+            pass
+
+
 def get_log_level() -> int:
     log_level_name = os.getenv("LOG_LEVEL", "INFO").upper()
     return getattr(logging, log_level_name, logging.INFO)
@@ -85,6 +112,12 @@ def configure_logging(log_file: Optional[str] = None) -> None:
     console_handler.setLevel(log_level)
     console_handler.setFormatter(AppFormatter(use_color=should_use_color()))
     root_logger.addHandler(console_handler)
+
+    # Redis handler for streaming logs to UI
+    redis_handler = RedisLogHandler()
+    redis_handler.setLevel(log_level)
+    root_logger.addHandler(redis_handler)
+
 
     # File handler (optional)
     if log_file:

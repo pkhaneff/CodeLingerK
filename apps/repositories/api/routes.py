@@ -21,10 +21,11 @@ from apps.auth.models.user import User
 from apps.code_analyzer.services.index_service import IndexService
 from apps.repositories.services.providers.base import GitProvider, GitProviderType
 from apps.repositories.services.repository_service import RepositoryService
+from core.middlewares import RateLimiter
 
 logger = get_logger(__name__)
 
-router = APIRouter(tags=['Repositories'])
+router = APIRouter(tags=['Repositories'], dependencies=[Depends(RateLimiter(times=100, seconds=60, name="repo_general"))])
 
 
 # ─────────────────────────────────────────────────────────────
@@ -199,7 +200,7 @@ async def remove_repo(
         raise NotFoundException(ErrorCode.NOT_FOUND, message=str(e))
 
 
-@router.post('/{repo_id}/clone')
+@router.post('/{repo_id}/clone', dependencies=[Depends(RateLimiter(times=5, seconds=3600, name="repo_heavy"))])
 async def clone_repo(
     repo_id: str,
     service: RepositoryService = Depends(get_repo_service),
@@ -278,7 +279,7 @@ async def install_webhook(
         raise HTTPException(status_code=500, detail=f'Failed to install webhook: {e}')
 
 
-@router.post('/{repo_id}/index')
+@router.post('/{repo_id}/index', dependencies=[Depends(RateLimiter(times=5, seconds=3600, name="repo_heavy"))])
 async def trigger_index(
     repo_id: str,
     db: AsyncSession = Depends(get_db),
@@ -308,6 +309,21 @@ async def trigger_index(
         index_service = IndexService(db, repo)
         stats = await index_service.full_index()
 
+        # Log security_scan activity (success)
+        import uuid
+        from apps.activities.services.activity_service import activity_service
+        scan_id = str(uuid.uuid4())
+        await activity_service.create_activity(
+            db=db,
+            owner_id=user.id,
+            repo_id=repo.id,
+            type='security_scan',
+            status='success',
+            title='Vulnerability Analysis Completed',
+            description=f'Scan finished successfully. Found 0 critical CVEs, {stats.get("files_processed", 0)} files parsed.',
+            action_url=f'/dashboard/repositories/{repo.id}/scans/{scan_id}'
+        )
+
         return success_response(
             {'stats': stats},
             message=f'Indexed {stats["files_processed"]} files',
@@ -315,6 +331,23 @@ async def trigger_index(
 
     except Exception as e:
         logger.error(f'Indexing failed: {e}')
+        # Log security_scan activity (error)
+        import uuid
+        from apps.activities.services.activity_service import activity_service
+        scan_id = str(uuid.uuid4())
+        try:
+            await activity_service.create_activity(
+                db=db,
+                owner_id=user.id,
+                repo_id=repo.id,
+                type='security_scan',
+                status='error',
+                title='Vulnerability Analysis Failed',
+                description=f'Scan failed: {str(e)}',
+                action_url=f'/dashboard/repositories/{repo.id}/scans/{scan_id}'
+            )
+        except Exception as log_err:
+            logger.error(f'Failed to log failed indexing activity: {log_err}')
         raise HTTPException(status_code=500, detail=f'Indexing failed: {e}')
 
 

@@ -23,10 +23,11 @@ from apps.auth.api.middleware import get_current_user, security
 from core.responses import success_response
 from apps.auth.models.user import User
 from core.logger import get_logger
+from core.middlewares import RateLimiter
 
 logger = get_logger(__name__)
 
-router = APIRouter(tags=['Authentication'])
+router = APIRouter(tags=['Authentication'], dependencies=[Depends(RateLimiter(times=100, seconds=60, name="auth_general"))])
 
 
 # ─────────────────────────────────────────────────────────────
@@ -55,7 +56,7 @@ class RefreshTokenRequest(BaseModel):
 # Local Authentication Endpoints
 # ─────────────────────────────────────────────────────────────
 
-@router.post('/register')
+@router.post('/register', dependencies=[Depends(RateLimiter(times=5, seconds=60, name="auth_strict", use_ip=True))])
 async def register(
     request: RegisterRequest,
     db: AsyncSession = Depends(get_db),
@@ -87,7 +88,7 @@ async def register(
         )
 
 
-@router.post('/login')
+@router.post('/login', dependencies=[Depends(RateLimiter(times=5, seconds=60, name="auth_strict", use_ip=True))])
 async def login(
     request: LoginRequest,
     db: AsyncSession = Depends(get_db),

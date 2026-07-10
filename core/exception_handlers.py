@@ -13,6 +13,7 @@ logger = get_logger(__name__)
 
 async def app_exception_handler(request: Request, exc: AppException):
     """Handler for all custom AppException subclasses."""
+    headers = getattr(exc, "headers", None)
     return JSONResponse(
         status_code=exc.status_code,
         content=error_response(
@@ -20,7 +21,8 @@ async def app_exception_handler(request: Request, exc: AppException):
             message=exc.message,
             reason=exc.reason,
             details=exc.details
-        )
+        ),
+        headers=headers
     )
 
 

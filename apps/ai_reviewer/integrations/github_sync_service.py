@@ -431,6 +431,23 @@ class GitHubSyncService:
 
             await self.db.flush()
 
+            # Log pr_review activity (success)
+            try:
+                from apps.activities.services.activity_service import activity_service
+                activity_status = 'warning' if len(provider_comments) > 0 else 'success'
+                await activity_service.create_activity(
+                    db=self.db,
+                    owner_id=repository.owner_id,
+                    repo_id=repository.id,
+                    type='pr_review',
+                    status=activity_status,
+                    title='Pull Request Reviewed',
+                    description=f"AI code assistant analyzed {review_run.reviewed_files_count} files on PR #{review_run.pr_number}. Left {len(provider_comments)} style suggestions.",
+                    action_url=pull_request.html_url
+                )
+            except Exception as log_err:
+                logger.error(f'Failed to log successful review activity: {log_err}')
+
             logger.info(
                 f'Synced review to provider: review_id={result.get("id") if result else None}, '
                 f'posted_comments={len(provider_comments)}'
@@ -448,6 +465,22 @@ class GitHubSyncService:
             # Update ReviewRun status to failed
             review_run.status = 'failed'
             await self.db.flush()
+
+            # Log pr_review activity (failed)
+            try:
+                from apps.activities.services.activity_service import activity_service
+                await activity_service.create_activity(
+                    db=self.db,
+                    owner_id=repository.owner_id,
+                    repo_id=repository.id,
+                    type='pr_review',
+                    status='error',
+                    title='Pull Request Review Failed',
+                    description=f"Failed to analyze PR #{pull_request.pr_number}: {str(e)}",
+                    action_url=pull_request.html_url
+                )
+            except Exception as log_err:
+                logger.error(f'Failed to log failed review activity: {log_err}')
 
             for comment in comments:
                 comment.sync_error = str(e)
@@ -480,13 +513,13 @@ class GitHubSyncService:
         match_title = re.search(r'\*\*\[(.*?)\]\s*(?:.[🔴🟠🟡🔵]?\s*)?(.*?)\*\*', comment_text)
         if match_title:
             title = match_title.group(2).strip()
-            parts = comment_text.split("**Why this matters:**")
+            parts = re.split(r'\*\*Why this matters:?\s*\*\*', comment_text)
             if len(parts) > 1:
                 evidence_part = parts[0].split(match_title.group(0))[-1].strip()
                 evidence = evidence_part
                 
                 rest = parts[1]
-                fix_parts = rest.split("**Suggested fix:**")
+                fix_parts = re.split(r'\*\*Suggested fix:?\s*\*\*', rest)
                 impact = fix_parts[0].strip()
                 if len(fix_parts) > 1:
                     fix = fix_parts[1].strip()

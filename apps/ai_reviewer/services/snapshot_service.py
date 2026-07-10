@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
 
 from core.logger import get_logger
+from infra.redis_client import redis_client
 from apps.ai_reviewer.models.pull_request import PullRequest, PullRequestStatus
 from apps.ai_reviewer.models.snapshot import Snapshot, SnapshotStatus
 from apps.repositories.models.repository import Repository
@@ -51,6 +52,7 @@ class SnapshotService:
         target_branch: str | None = None,
         author: str | None = None,
         html_url: str | None = None,
+        status: str | None = None,
     ) -> PullRequest:
         """
         Get existing PR or create new record.
@@ -63,6 +65,7 @@ class SnapshotService:
             target_branch: Base branch (optional)
             author: PR author username (optional)
             html_url: GitHub PR URL (optional)
+            status: PR status (optional)
 
         Returns:
             PullRequest model
@@ -88,12 +91,14 @@ class SnapshotService:
                 existing.author = author
             if html_url:
                 existing.html_url = html_url
+            if status:
+                existing.status = status
 
             await self.db.flush()
             return existing
 
         # Fetch PR details from GitHub if not provided
-        if not title or not source_branch or not target_branch:
+        if not title or not source_branch or not target_branch or not status:
             try:
                 pr_info = await self.git_provider.get_pr(
                     repo_identifier=repository.full_name,
@@ -103,6 +108,7 @@ class SnapshotService:
                 source_branch = source_branch or pr_info.get('source_branch', 'unknown')
                 target_branch = target_branch or pr_info.get('target_branch', 'main')
                 html_url = html_url or pr_info.get('html_url')
+                status = status or pr_info.get('state')
             except Exception as e:
                 logger.warning(f'Failed to fetch PR info: {e}')
                 title = title or f'PR #{pr_number}'
@@ -114,7 +120,7 @@ class SnapshotService:
             repository_id=repository.id,
             pr_number=pr_number,
             title=title,
-            status=PullRequestStatus.OPEN.value,
+            status=status or PullRequestStatus.OPEN.value,
             source_branch=source_branch,
             target_branch=target_branch,
             author=author,
@@ -146,6 +152,8 @@ class SnapshotService:
                 existing.author = author
             if html_url:
                 existing.html_url = html_url
+            if status:
+                existing.status = status
 
             await self.db.flush()
             return existing
@@ -406,4 +414,5 @@ class SnapshotService:
             snapshot.mark_failed(error_message or 'Unknown error')
 
         await self.db.flush()
+        await redis_client.publish_snapshot_status(snapshot.id, snapshot.status, snapshot.error_message)
         logger.info(f'Snapshot {snapshot.id[:8]} status updated to {status.value}')

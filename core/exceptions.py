@@ -78,6 +78,11 @@ class ErrorCode(Enum):
     NOT_EXISTS = (409, 40903, "Tài nguyên không tồn tại")
 
     # =========================================================================
+    # TOO MANY REQUESTS (429)
+    # =========================================================================
+    TOO_MANY_REQUESTS = (429, 42901, "Yêu cầu quá thường xuyên, vui lòng thử lại sau")
+
+    # =========================================================================
     # INTERNAL SERVER ERROR (500)
     # =========================================================================
     SYSTEM_ERROR = (500, 50001, "Lỗi hệ thống nội bộ phía Server")
@@ -156,6 +161,25 @@ class ForbiddenException(AppException):
         message: str | None = None,
         details: Any | None = None,
     ):
+        super().__init__(error_code, message, details)
+
+
+class TooManyRequestsException(AppException):
+    """Exception raised when rate limits are exceeded (HTTP 429)."""
+    def __init__(
+        self,
+        retry_after: int,
+        limit: int,
+        remaining: int,
+        error_code: ErrorCode = ErrorCode.TOO_MANY_REQUESTS,
+        message: str | None = None,
+        details: Any | None = None,
+    ):
+        self.headers = {
+            "Retry-After": str(retry_after),
+            "X-RateLimit-Limit": str(limit),
+            "X-RateLimit-Remaining": str(remaining),
+        }
         super().__init__(error_code, message, details)
 
 
